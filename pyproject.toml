@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wuji"
+version = "0.1.0"
+description = "wuji — submit ML/RL training jobs as Volcano Jobs on the ACK Edge GPU cluster"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "wuji platform team" }]
+dependencies = [
+    "typer>=0.9",
+    "kubernetes>=27.0",
+]
+
+[project.optional-dependencies]
+rich = ["rich>=13.0"]
+
+[project.scripts]
+wuji = "wuji.cli:app"
+
+[tool.setuptools]
+packages = ["wuji"]

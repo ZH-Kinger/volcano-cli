@@ -1,0 +1,163 @@
+"""Kubernetes client plumbing for wuji.
+
+Handles the dual auth mode required by the platform:
+
+* inside the cluster (a notebook / pod using its ServiceAccount) we use
+  :func:`kubernetes.config.load_incluster_config`;
+* on a user's laptop we fall back to their local kubeconfig via
+  :func:`kubernetes.config.load_kube_config`.
+
+It also centralises the Volcano CRD coordinates so the rest of the package
+never has to remember group/version/plural strings.
+"""
+
+from __future__ import annotations
+
+from typing import Optional, Tuple
+
+from kubernetes import client, config
+from kubernetes.config.config_exception import ConfigException
+
+# --- Volcano custom-resource coordinates -----------------------------------
+# batch.volcano.sh/v1alpha1 Job  (the training job)
+VOLCANO_JOB_GROUP = "batch.volcano.sh"
+VOLCANO_JOB_VERSION = "v1alpha1"
+VOLCANO_JOB_PLURAL = "jobs"
+
+# scheduling.volcano.sh/v1beta1 Queue  (cluster-scoped)
+VOLCANO_QUEUE_GROUP = "scheduling.volcano.sh"
+VOLCANO_QUEUE_VERSION = "v1beta1"
+VOLCANO_QUEUE_PLURAL = "queues"
+
+# Pods created by a Volcano Job carry this label = the job name.
+JOB_NAME_LABEL = "volcano.sh/job-name"
+
+# Admin annotates each edge node with its elastic public IP so wuji can print a
+# reachable ``ssh root@<ip> -p <nodeport>`` line for --expose-ssh jobs.
+NODE_PUBLIC_IP_ANNOTATION = "wuji.io/public-ip"
+
+# --- wuji save (platform-delegated image commit) ---------------------------
+# A `wuji save` request is just a ConfigMap in the user's namespace carrying
+# this label; the privileged `wuji-saver` DaemonSet watches for it, commits the
+# user's live container on the node, and pushes to ACR. The user never touches
+# containerd or ACR write credentials — the saver holds both.
+SAVE_REQUEST_LABEL = "wuji.io/save-request"
+
+# Live ACR (Huhehaote, same region as the cluster). Saved dev images land here.
+DEFAULT_ACR_REGISTRY = "wuji-rl-acr-registry.cn-huhehaote.cr.aliyuncs.com"
+DEFAULT_ACR_REPO_PREFIX = "wuji-rl"
+
+# Platform image index: a shared ConfigMap listing images users can pull. The ACR
+# pull token can't list the catalog (pull-only scope), so instead wuji-saver
+# appends each saved image here and admins seed base images. ``wuji images`` reads
+# it — no ACR credential needed on the user side. All authenticated users are
+# granted read on just this one ConfigMap (see saver/image-index.yaml).
+IMAGE_INDEX_NAMESPACE = "wuji-public"
+IMAGE_INDEX_NAME = "wuji-images"
+
+
+class WujiError(RuntimeError):
+    """User-facing error: message is safe to print without a traceback."""
+
+
+def load_clients() -> Tuple[client.CoreV1Api, client.BatchV1Api, client.CustomObjectsApi]:
+    """Load kube config (in-cluster first, then kubeconfig) and build API clients.
+
+    Returns:
+        A tuple ``(core_v1, batch_v1, custom)`` of ready-to-use API clients.
+
+    Raises:
+        WujiError: if neither in-cluster config nor a local kubeconfig can be
+            loaded (e.g. running off-cluster with no ``~/.kube/config``).
+    """
+    try:
+        config.load_incluster_config()
+    except ConfigException:
+        try:
+            config.load_kube_config()
+        except ConfigException as exc:  # no in-cluster SA and no kubeconfig
+            raise WujiError(
+                "找不到 Kubernetes 配置:集群内需挂载 ServiceAccount,"
+                "集群外需要 ~/.kube/config(或设置 $KUBECONFIG)。\n"
+                f"原始错误: {exc}"
+            ) from exc
+
+    return client.CoreV1Api(), client.BatchV1Api(), client.CustomObjectsApi()
+
+
+def current_namespace(team: Optional[str] = None) -> str:
+    """Resolve the namespace to operate in.
+
+    Args:
+        team: explicit team/namespace override (wins if provided).
+
+    Resolution order:
+        1. ``team`` argument (from ``--team``),
+        2. the namespace of the active kubeconfig context,
+        3. the in-cluster ServiceAccount namespace file,
+        4. ``"default"`` as a last resort.
+
+    Returns:
+        The resolved namespace name.
+    """
+    if team:
+        return team
+
+    # 2) kubeconfig context namespace
+    try:
+        _, active = config.list_kube_config_contexts()
+        ns = (active or {}).get("context", {}).get("namespace")
+        if ns:
+            return ns
+    except (ConfigException, FileNotFoundError, IndexError, TypeError):
+        pass
+
+    # 3) in-cluster SA namespace
+    try:
+        with open(
+            "/var/run/secrets/kubernetes.io/serviceaccount/namespace",
+            encoding="utf-8",
+        ) as fh:
+            ns = fh.read().strip()
+            if ns:
+                return ns
+    except OSError:
+        pass
+
+    # 4) fallback
+    return "default"
+
+
+def humanize_api_exception(exc: Exception) -> str:
+    """Turn a kubernetes ``ApiException`` (or any error) into a friendly line.
+
+    Args:
+        exc: the caught exception.
+
+    Returns:
+        A short human-readable message (no stack trace).
+    """
+    from kubernetes.client.exceptions import ApiException
+
+    if isinstance(exc, ApiException):
+        reason = exc.reason or "请求失败"
+        detail = ""
+        body = getattr(exc, "body", None)
+        if body:
+            try:
+                import json
+
+                detail = json.loads(body).get("message", "")
+            except (ValueError, TypeError):
+                detail = ""
+        if exc.status == 401:
+            return "认证失败(401):凭据无效或过期,请检查 kubeconfig / ServiceAccount。"
+        if exc.status == 403:
+            return f"权限不足(403):{detail or reason}。请确认账号在该 namespace 的 RBAC。"
+        if exc.status == 404:
+            return f"资源不存在(404):{detail or reason}。"
+        if exc.status == 409:
+            return f"资源冲突(409):{detail or reason}(可能同名任务已存在)。"
+        return f"Kubernetes API 错误({exc.status}):{detail or reason}"
+
+    return str(exc)
