@@ -19,7 +19,7 @@ dependencies = [
 rich = ["rich>=13.0"]
 
 [project.scripts]
-volcano = "volcano.cli:app"
+volcano = "volcano.cli:main"
 
 [tool.setuptools]
 packages = ["volcano"]

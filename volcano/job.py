@@ -59,7 +59,7 @@ _DIST_PROLOGUE = (
     '  export MASTER_PORT="${MASTER_PORT:-29500}"\n'
     '  export NNODES="${NNODES:-${VC_WORKER_NUM:-1}}"\n'
     '  export NODE_RANK="${NODE_RANK:-${VC_TASK_INDEX:-0}}"\n'
-    '  echo "[wuji] dist: MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT '
+    '  echo "[volcano] dist: MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT '
     'NNODES=$NNODES NODE_RANK=$NODE_RANK"\n'
     'fi'
 )

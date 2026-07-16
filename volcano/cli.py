@@ -371,7 +371,7 @@ def save(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
     worker: int = typer.Option(0, "--worker", help="第几个 worker(多机);默认 0。"),
     container: str = typer.Option(
-        "worker", "--container", help="容器名(wuji 起的任务默认是 worker)。"
+        "worker", "--container", help="容器名(volcano 起的任务默认是 worker)。"
     ),
     no_wait: bool = typer.Option(
         False, "--no-wait", help="只提交保存请求,不等待完成(自己稍后查状态)。"
@@ -585,7 +585,7 @@ def exec_cmd(
     """进入任务容器(交互式 shell)。
 
     自动找到该任务的 Pod,底层用 ``kubectl exec -it`` 拿到真正的交互式 TTY,
-    所以需要本机装了 kubectl(和 wuji 用同一个 kubeconfig)。
+    所以需要本机装了 kubectl(和 volcano 用同一个 kubeconfig)。
     """
     import shutil
     import subprocess
@@ -938,9 +938,17 @@ def data_ls(
 
 
 def main() -> None:
-    """Console-script entry point (mirrors ``volcano = volcano.cli:app``)."""
-    app()
+    """Console-script entry point (``volcano = volcano.cli:main``).
+
+    顶层兜底:把 WujiError(如未指定团队/namespace 解析失败)呈现为一行友好提示,
+    而不是裸 traceback —— 覆盖那些在命令 try 块之外解析 namespace 的路径。
+    """
+    try:
+        app()
+    except WujiError as exc:
+        _err(str(exc))
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    sys.exit(app())
+    main()

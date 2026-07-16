@@ -94,11 +94,16 @@ def current_namespace(team: Optional[str] = None) -> str:
     Resolution order:
         1. ``team`` argument (from ``--team``),
         2. the namespace of the active kubeconfig context,
-        3. the in-cluster ServiceAccount namespace file,
-        4. ``"default"`` as a last resort.
+        3. the in-cluster ServiceAccount namespace file.
+
+    If none resolve, raises :class:`WujiError` (does NOT fall back to
+    ``"default"`` — default has no ``<team>-nas`` volume and would FailedMount).
 
     Returns:
         The resolved namespace name.
+
+    Raises:
+        WujiError: when no team/context/in-cluster namespace can be determined.
     """
     if team:
         return team
