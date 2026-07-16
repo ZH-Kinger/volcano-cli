@@ -434,13 +434,23 @@ def images(
         _echo("镜像索引为空(还没人 wuji save 过,管理员也没种基础镜像)。")
         _echo("管理员可参考 scheduler-platform/saver/README.md 种基础镜像。")
         return
-    _print_table(
-        "可拉取镜像(kind: base=基础镜像 / saved=团队保存)",
-        ["IMAGE", "KIND", "TEAM", "CREATED"],
-        [[r["image"], r["kind"], r["team"] or "-", r["created"] or "-"] for r in rows],
-    )
+    # 一行一个完整镜像地址(方便直接复制给 -i);不用表格,避免长地址被终端宽度截断。
+    base = [r for r in rows if r["kind"] == "base"]
+    saved = [r for r in rows if r["kind"] != "base"]
+    _echo(f"可拉取镜像:base {len(base)} 个,saved(团队保存){len(saved)} 个")
+    if base:
+        _echo("")
+        _echo("── 基础镜像(base)──")
+        for r in base:
+            _echo(f"  {r['image']}")
+    if saved:
+        _echo("")
+        _echo("── 团队保存(saved)──")
+        for r in saved:
+            extra = "  ".join(x for x in [r["team"], r["created"]] if x)
+            _echo(f"  {r['image']}" + (f"   [{extra}]" if extra else ""))
     _echo("")
-    _echo("用法: wuji dev --name <名> -i <IMAGE>   或   wuji train --name <名> -i <IMAGE> -- <命令>")
+    _echo("用法: 复制上面某一整行完整地址,wuji dev --name <名> -i <地址>  /  wuji train ... -i <地址> -- <命令>")
 
 
 # --------------------------------------------------------------------------- #
