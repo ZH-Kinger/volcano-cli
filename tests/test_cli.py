@@ -8,7 +8,7 @@ rejection, the `-t` short flag for --team, and the post-submit connection hints
 import pytest
 from typer.testing import CliRunner
 
-import wuji.cli as cli
+import volcano.cli as cli
 
 runner = CliRunner()
 
@@ -135,9 +135,9 @@ def test_submit_prints_connection_hints(monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert "已提交任务: myjob" in result.output
-    assert "wuji status myjob --team teamx" in result.output
-    assert "wuji logs myjob -f --team teamx" in result.output
-    assert "wuji exec myjob --team teamx -- bash" in result.output
+    assert "volcano status myjob --team teamx" in result.output
+    assert "volcano logs myjob -f --team teamx" in result.output
+    assert "volcano exec myjob --team teamx -- bash" in result.output
 
 
 def test_submit_passes_expose_ssh_flags_to_sdk(monkeypatch):
@@ -165,7 +165,7 @@ def test_submit_ssh_hint_when_ssh_flag(monkeypatch):
         ["submit", "--name", "j", "-t", "teamx", "--image", "img", "--cmd", "c", "--ssh"],
     )
     assert result.exit_code == 0, result.output
-    assert "wuji ssh j --team teamx" in result.output
+    assert "volcano ssh j --team teamx" in result.output
 
 
 def test_submit_port_forward_hint(monkeypatch):
@@ -175,7 +175,7 @@ def test_submit_port_forward_hint(monkeypatch):
         ["submit", "--name", "j", "-t", "teamx", "--image", "img", "--cmd", "c", "--port", "6006"],
     )
     assert result.exit_code == 0, result.output
-    assert "wuji forward j 6006 --team teamx" in result.output
+    assert "volcano forward j 6006 --team teamx" in result.output
 
 
 # --------------------------------------------------------------------------- #
@@ -375,7 +375,8 @@ def test_list_train_passes_kind(monkeypatch):
              "gpus": 8, "age": "t"}
         ])[1],
     )
-    result = runner.invoke(cli.app, ["list", "train"])
+    # 需带 --team(现在无 team 且无 kubeconfig context ns 时 current_namespace 会明确报错)
+    result = runner.invoke(cli.app, ["list", "train", "--team", "teamx"])
     assert result.exit_code == 0, result.output
     assert seen["kind"] == "train"
 

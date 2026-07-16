@@ -1,4 +1,4 @@
-"""Kubernetes client plumbing for wuji.
+"""Kubernetes client plumbing for volcano.
 
 Handles the dual auth mode required by the platform:
 
@@ -36,8 +36,8 @@ JOB_NAME_LABEL = "volcano.sh/job-name"
 # reachable ``ssh root@<ip> -p <nodeport>`` line for --expose-ssh jobs.
 NODE_PUBLIC_IP_ANNOTATION = "wuji.io/public-ip"
 
-# --- wuji save (platform-delegated image commit) ---------------------------
-# A `wuji save` request is just a ConfigMap in the user's namespace carrying
+# --- volcano save (platform-delegated image commit) ---------------------------
+# A `volcano save` request is just a ConfigMap in the user's namespace carrying
 # this label; the privileged `wuji-saver` DaemonSet watches for it, commits the
 # user's live container on the node, and pushes to ACR. The user never touches
 # containerd or ACR write credentials — the saver holds both.
@@ -49,7 +49,7 @@ DEFAULT_ACR_REPO_PREFIX = "wuji-rl"
 
 # Platform image index: a shared ConfigMap listing images users can pull. The ACR
 # pull token can't list the catalog (pull-only scope), so instead wuji-saver
-# appends each saved image here and admins seed base images. ``wuji images`` reads
+# appends each saved image here and admins seed base images. ``volcano images`` reads
 # it — no ACR credential needed on the user side. All authenticated users are
 # granted read on just this one ConfigMap (see saver/image-index.yaml).
 IMAGE_INDEX_NAMESPACE = "wuji-public"
@@ -124,8 +124,14 @@ def current_namespace(team: Optional[str] = None) -> str:
     except OSError:
         pass
 
-    # 4) fallback
-    return "default"
+    # 4) 无法确定 namespace:不静默落到 "default"。default 没有 <team>-nas 数据卷,
+    #    任务会 FailedMount 卡住且报错难懂,所以这里明确报错、引导用户指定团队。
+    raise WujiError(
+        "无法确定团队 namespace:请用 --team <团队> 指定,或在 kubeconfig 的 "
+        "context 里设置 namespace。不要用没设默认 namespace 的 admin kubeconfig"
+        "——否则任务会落到 default,而 default 没有 <团队>-nas 数据卷,Pod 会 "
+        "FailedMount 卡住。"
+    )
 
 
 def humanize_api_exception(exc: Exception) -> str:

@@ -1,4 +1,4 @@
-"""Unit tests for wuji.sdk.logs pod/worker target resolution.
+"""Unit tests for volcano.sdk.logs pod/worker target resolution.
 
 Rules: explicit ``pod`` wins; else ``worker=N`` -> ``<name>-worker-<N>``; else the
 first pod (via label selector). The kubernetes core client is mocked — no cluster.
@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import wuji.sdk as sdk
+import volcano.sdk as sdk
 
 
 class FakeCore:

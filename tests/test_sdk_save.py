@@ -1,4 +1,4 @@
-"""Unit tests for the wuji `save` surface in wuji.sdk.
+"""Unit tests for the wuji `save` surface in volcano.sdk.
 
 Covers ``_resolve_image_ref`` (tag → full ACR ref rules), ``save_image``
 (SaveRequest ConfigMap creation + status polling / error / timeout paths) and
@@ -14,8 +14,8 @@ from types import SimpleNamespace
 import pytest
 from kubernetes.client.exceptions import ApiException
 
-import wuji.sdk as sdk
-from wuji.kube import (
+import volcano.sdk as sdk
+from volcano.kube import (
     DEFAULT_ACR_REGISTRY,
     DEFAULT_ACR_REPO_PREFIX,
     SAVE_REQUEST_LABEL,

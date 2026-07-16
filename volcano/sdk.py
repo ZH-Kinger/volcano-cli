@@ -1,7 +1,7 @@
-"""SDK functions — the programmatic surface of wuji.
+"""SDK functions — the programmatic surface of volcano.
 
-Every function here is import-safe (``import wuji; wuji.submit(...)``) and is
-also what ``wuji.cli`` calls under the hood. Each resolves the namespace,
+Every function here is import-safe (``import volcano; volcano.submit(...)``) and is
+also what ``volcano.cli`` calls under the hood. Each resolves the namespace,
 loads clients, and turns Kubernetes ``ApiException``\\ s into :class:`WujiError`.
 """
 
@@ -74,7 +74,7 @@ def submit(
         name: job name. team: namespace (defaults to the resolved namespace).
         queue: Volcano queue. image: full ACR image ref. command: training cmd.
         gpus/nodes/data/shared_data/cpu/memory/shared_dataset_pvc: see
-            :func:`wuji.job.build_volcano_job`.
+            :func:`volcano.job.build_volcano_job`.
         expose_ssh: also create a NodePort Service exposing the pod's sshd on a
             node's elastic public IP (implies ssh). ssh_node_port: pin a specific
             NodePort (30000-32767) instead of letting Kubernetes auto-assign.
@@ -167,7 +167,7 @@ def _create_ssh_service(
 
     When ``owner`` (the created Job object) is provided, the Service gets an
     ownerReference to it so Kubernetes garbage-collects the Service when the Job
-    is deleted — not only via ``wuji kill`` but also on natural completion/TTL.
+    is deleted — not only via ``volcano kill`` but also on natural completion/TTL.
     """
     core, _, _ = load_clients()
     port: Dict[str, Any] = {
@@ -212,7 +212,7 @@ def _create_ssh_service(
     except ApiException as exc:
         raise WujiError(
             f"任务 {name} 已建并在运行,但暴露 SSH 的 NodePort Service 创建失败:"
-            f"{humanize_api_exception(exc)}。如不需要该任务,请执行: wuji kill {name}"
+            f"{humanize_api_exception(exc)}。如不需要该任务,请执行: volcano kill {name}"
         ) from exc
     ports = svc.spec.ports if svc.spec else None
     return ports[0].node_port if ports else None
@@ -331,7 +331,7 @@ def _create_worker_ssh_services(
         except ApiException as exc:
             raise WujiError(
                 f"任务 {name} 已建并在运行,但 worker {i} 的 SSH Service 创建失败:"
-                f"{humanize_api_exception(exc)}。如不需要该任务,请执行: wuji kill {name}"
+                f"{humanize_api_exception(exc)}。如不需要该任务,请执行: volcano kill {name}"
             ) from exc
         out[i] = svc.spec.ports[0].node_port if svc.spec and svc.spec.ports else None
     return out
@@ -450,7 +450,7 @@ def worker_ssh_endpoint(
 
 
 # --------------------------------------------------------------------------- #
-# wuji save — platform-delegated commit of a live container to ACR
+# volcano save — platform-delegated commit of a live container to ACR
 # --------------------------------------------------------------------------- #
 def _resolve_image_ref(
     tag: str,
@@ -634,7 +634,7 @@ def list_images(
     """List images users can pull, from the platform image index ConfigMap.
 
     The index is populated two ways: ``wuji-saver`` appends every image produced
-    by ``wuji save``, and admins seed base images. Reading it needs no ACR
+    by ``volcano save``, and admins seed base images. Reading it needs no ACR
     credential (the ACR pull token cannot list the catalog anyway).
 
     Each ConfigMap ``data`` value is a JSON object; malformed/legacy entries fall
@@ -679,7 +679,7 @@ def list_images(
             continue
         out.append(row)
     # str() guard: a hand-seeded base entry with a non-string image must not
-    # crash the whole `wuji images` via a str/int comparison in the sort key.
+    # crash the whole `volcano images` via a str/int comparison in the sort key.
     out.sort(key=lambda r: (str(r["kind"]), str(r["image"])))
     return out
 

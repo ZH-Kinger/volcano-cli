@@ -1,8 +1,8 @@
-"""wuji command line interface (Typer).
+"""volcano command line interface (Typer).
 
 Commands: ``submit``, ``list``/``ls``, ``status``, ``logs``, ``kill``,
 ``queue``, ``data ls``. Every command loads clients lazily so that
-``wuji --help`` works with no kubeconfig and no network.
+``volcano --help`` works with no kubeconfig and no network.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from . import sdk
 
 app = typer.Typer(
     add_completion=False,
-    help="wuji — 把训练任务提交成 Volcano Job(ACK Edge GPU 集群)。",
+    help="volcano — 把训练任务提交成 Volcano Job(ACK Edge GPU 集群)。",
     no_args_is_help=True,
 )
 data_app = typer.Typer(help="查看 NAS / 共享数据集里的数据。", no_args_is_help=True)
@@ -103,7 +103,7 @@ def _submit_impl(
     dry_run: bool,
     kind: str,
 ) -> None:
-    """``wuji train`` / ``wuji submit`` / ``wuji dev`` 的共用实现。"""
+    """``volcano train`` / ``volcano submit`` / ``volcano dev`` 的共用实现。"""
     run_cmd = list(command) if command else None
     if run_cmd and cmd:
         _err("--cmd 与 -- CMD 只能给一个。")
@@ -161,9 +161,9 @@ def _submit_impl(
     team_arg = f" --team {team}" if team else ""
     label = "开发机" if kind == "dev" else "任务"
     _echo(f"已提交{label}: {name}  (ns={ns}, queue={queue}, {nodes}x{gpus} GPU, kind={kind})")
-    _echo(f"查看状态: wuji status {name}{team_arg}")
-    _echo(f"看日志:   wuji logs {name} -f{team_arg}")
-    _echo(f"进容器:   wuji exec {name}{team_arg} -- {shell}")
+    _echo(f"查看状态: volcano status {name}{team_arg}")
+    _echo(f"看日志:   volcano logs {name} -f{team_arg}")
+    _echo(f"进容器:   volcano exec {name}{team_arg} -- {shell}")
 
     enable_ssh = ssh or ssh_password or ssh_pubkey or expose_ssh
     port_arg = f" --ssh-port {ssh_port}" if ssh_port != 22 else ""
@@ -204,9 +204,9 @@ def _submit_impl(
                 np = worker_nps.get(i)
                 _echo(
                     f"  worker {i}: NodePort {np};公网 IP 待解析,稍后跑 "
-                    f"wuji ssh {name} --worker {i}{team_arg}"
+                    f"volcano ssh {name} --worker {i}{team_arg}"
                 )
-        _echo(f"  或走隧道: wuji ssh {name} --worker <i>{team_arg}")
+        _echo(f"  或走隧道: volcano ssh {name} --worker <i>{team_arg}")
     elif expose_ssh:
         node_port = result.get("_ssh_node_port") if isinstance(result, dict) else None
         _echo("")
@@ -231,27 +231,27 @@ def _submit_impl(
                 f"  NodePort {node_port} 已分配,但节点公网 IP 还没解析出来"
                 f"(pod 未调度,或节点缺 wuji.io/public-ip 注解/无 node 读权限)。"
             )
-            _echo(f"  稍后跑: wuji ssh {name}{team_arg}  # 会自动走公网直连")
-        _echo(f"  或仍走隧道: wuji ssh {name}{team_arg}{port_arg}")
+            _echo(f"  稍后跑: volcano ssh {name}{team_arg}  # 会自动走公网直连")
+        _echo(f"  或仍走隧道: volcano ssh {name}{team_arg}{port_arg}")
     elif enable_ssh:
         _echo("")
         _echo("SSH 就绪(root,密码即 --ssh-password;需容器 Running 后稍等 sshd 起来):")
-        _echo(f"  一步连:   wuji ssh {name}{team_arg}{port_arg}")
+        _echo(f"  一步连:   volcano ssh {name}{team_arg}{port_arg}")
         _echo(
-            f"  或用 IP:  wuji forward {name} {ssh_port} --local-port 2222{team_arg}  "
+            f"  或用 IP:  volcano forward {name} {ssh_port} --local-port 2222{team_arg}  "
             f"# 挂着别关,另开终端: ssh -p 2222 root@127.0.0.1"
         )
     for p in port or []:
         if enable_ssh and p == ssh_port:
             continue  # already covered by the SSH hint above
-        _echo(f"转发端口 {p}:  wuji forward {name} {p}{team_arg}  # 本地 http://localhost:{p}")
+        _echo(f"转发端口 {p}:  volcano forward {name} {p}{team_arg}  # 本地 http://localhost:{p}")
 
 
 # --------------------------------------------------------------------------- #
 # train / submit (DLC:训练任务)  &  dev (DSW:开发机)
 # --------------------------------------------------------------------------- #
 @app.command("train")
-@app.command("submit", hidden=True)  # 兼容旧名:wuji submit == wuji train
+@app.command("submit", hidden=True)  # 兼容旧名:volcano submit == volcano train
 def train(
     command: Optional[List[str]] = typer.Argument(
         None, metavar="[-- CMD ...]",
@@ -271,7 +271,7 @@ def train(
     ),
     cpu: str = typer.Option("16", "--cpu", "-c", help="每 worker CPU 限额。"),
     memory: str = typer.Option("64Gi", "--memory", "-m", help="每 worker 内存限额。"),
-    ssh: bool = typer.Option(False, "--ssh", help="在容器里起 sshd(root),之后 wuji ssh 进入。"),
+    ssh: bool = typer.Option(False, "--ssh", help="在容器里起 sshd(root),之后 volcano ssh 进入。"),
     ssh_password: Optional[str] = typer.Option(
         None, "--ssh-password", help="SSH root 密码;会写进 Job env(同 ns 可见)。不给则自动生成。"
     ),
@@ -296,7 +296,7 @@ def train(
     cmd: Optional[str] = typer.Option(None, "--cmd", help="命令整段字符串;与 -- CMD 二选一。"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只打印 Job YAML,不真提交。"),
 ) -> None:
-    """提交训练任务(DLC:跑完即退出;支持多机分布式)。`wuji submit` 是同义词。"""
+    """提交训练任务(DLC:跑完即退出;支持多机分布式)。`volcano submit` 是同义词。"""
     _submit_impl(
         command=command, cmd=cmd, name=name, team=team, queue=queue, image=image,
         gpus=gpus, nodes=nodes, data=data, shared_data=shared_data, cpu=cpu,
@@ -324,7 +324,7 @@ def dev(
     ),
     cpu: str = typer.Option("16", "--cpu", "-c", help="CPU 限额。"),
     memory: str = typer.Option("64Gi", "--memory", "-m", help="内存限额。"),
-    ssh: bool = typer.Option(False, "--ssh", help="起 sshd(root),之后 wuji ssh 进入。"),
+    ssh: bool = typer.Option(False, "--ssh", help="起 sshd(root),之后 volcano ssh 进入。"),
     ssh_password: Optional[str] = typer.Option(
         None, "--ssh-password", help="SSH root 密码;不给则自动生成。"
     ),
@@ -345,7 +345,7 @@ def dev(
     cmd: Optional[str] = typer.Option(None, "--cmd", help="启动命令整段字符串。"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只打印 Job YAML,不真提交。"),
 ) -> None:
-    """起一个开发机(DSW:长驻交互容器,用 wuji exec/ssh 进去开发调试)。"""
+    """起一个开发机(DSW:长驻交互容器,用 volcano exec/ssh 进去开发调试)。"""
     if not command and not cmd:
         cmd = "tail -f /dev/null"  # 默认长驻,否则容器跑完就退、exec/ssh 进不去
     _submit_impl(
@@ -382,7 +382,7 @@ def save(
 
     你不需要 docker,也不需要 ACR 凭据:平台的 wuji-saver 组件在容器所在节点用
     containerd 提交并推送(它独占 containerd socket + ACR 写凭据)。你这边只是发一个
-    保存请求。改环境后 `wuji save <名> --tag myenv:v1`,下次 `wuji dev/train -i` 直接用。
+    保存请求。改环境后 `volcano save <名> --tag myenv:v1`,下次 `volcano dev/train -i` 直接用。
     """
     try:
         result = sdk.save_image(
@@ -404,8 +404,8 @@ def save(
         return
     _echo(f"✅ 已保存并推送: {image}   (节点 {result.get('node') or '?'})")
     _echo("下次直接拿它起环境:")
-    _echo(f"  wuji dev   --name <新开发机> -i {image}")
-    _echo(f"  wuji train --name <新任务>   -i {image} -- python train.py")
+    _echo(f"  volcano dev   --name <新开发机> -i {image}")
+    _echo(f"  volcano train --name <新任务>   -i {image} -- python train.py")
 
 
 # --------------------------------------------------------------------------- #
@@ -420,7 +420,7 @@ def images(
         False, "--mine", help="只看当前团队保存的镜像(= --team 当前 ns)。"
     ),
 ) -> None:
-    """列出可直接拉取的镜像(基础镜像 + 各团队 wuji save 存下的)。
+    """列出可直接拉取的镜像(基础镜像 + 各团队 volcano save 存下的)。
 
     读的是平台维护的镜像索引(一个共享 ConfigMap),不需要 ACR 凭据 —— ACR 的拉取
     令牌本身没有列目录的权限。想要 ACR 完整权威目录,请管理员用 aliyun cr / 控制台。
@@ -431,7 +431,7 @@ def images(
     except Exception as exc:  # noqa: BLE001
         _die(exc)
     if not rows:
-        _echo("镜像索引为空(还没人 wuji save 过,管理员也没种基础镜像)。")
+        _echo("镜像索引为空(还没人 volcano save 过,管理员也没种基础镜像)。")
         _echo("管理员可参考 scheduler-platform/saver/README.md 种基础镜像。")
         return
     # 一行一个完整镜像地址(方便直接复制给 -i);不用表格,避免长地址被终端宽度截断。
@@ -450,7 +450,7 @@ def images(
             extra = "  ".join(x for x in [r["team"], r["created"]] if x)
             _echo(f"  {r['image']}" + (f"   [{extra}]" if extra else ""))
     _echo("")
-    _echo("用法: 复制上面某一整行完整地址,wuji dev --name <名> -i <地址>  /  wuji train ... -i <地址> -- <命令>")
+    _echo("用法: 复制上面某一整行完整地址,volcano dev --name <名> -i <地址>  /  volcano train ... -i <地址> -- <命令>")
 
 
 # --------------------------------------------------------------------------- #
@@ -465,7 +465,7 @@ def list_cmd(
     ),
     team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
 ) -> None:
-    """列出本团队的任务;`wuji list dev` / `wuji list train` 分类查看。"""
+    """列出本团队的任务;`volcano list dev` / `volcano list train` 分类查看。"""
     if kind and kind not in ("dev", "train"):
         _err("list 的过滤参数只能是 dev 或 train。")
         raise typer.Exit(code=1)
@@ -483,6 +483,11 @@ def list_cmd(
         ["NAME", "KIND", "PHASE", "QUEUE", "GPUS", "AGE"],
         rows,
     )
+    if not rows:
+        _echo(
+            "(空)注意:这里只列 volcano 提交的 Volcano Job;"
+            "直接用 kubectl 起的原生 Job/Pod 不在此列,用 `kubectl get pods` 查看。"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -586,7 +591,7 @@ def exec_cmd(
     import subprocess
 
     if not shutil.which("kubectl"):
-        _err("需要本机安装 kubectl(wuji exec 底层用它拿交互式 TTY)。")
+        _err("需要本机安装 kubectl(volcano exec 底层用它拿交互式 TTY)。")
         raise typer.Exit(code=1)
 
     ns = current_namespace(team)
@@ -772,6 +777,10 @@ def queue() -> None:
         ["队列", "状态", "GPU 用/配/顶", "CPU核", "内存Gi"],
         [_queue_row(q) for q in queues],
     )
+    _echo(
+        "提示:这里的「已用」只统计走 Volcano 调度(schedulerName: volcano)的任务;"
+        "直接用 kubectl/default-scheduler 起的任务不计入队列账。看节点真实空闲用 `volcano top`。"
+    )
 
 
 @app.command()
@@ -870,7 +879,9 @@ def data_ls(
             "containers": [
                 {
                     "name": "ls",
-                    "image": "registry.cn-hangzhou.aliyuncs.com/acs/busybox:v1.29.2",
+                    # 用边缘节点已预热的 ubuntu:24.04(image-prepull 常驻),秒起免冷拉;
+                    # 别用跨区镜像,呼和浩特边缘冷拉易超时。
+                    "image": "ubuntu:24.04",
                     "command": ["sh", "-c", f"ls -la {target}"],
                     "volumeMounts": [{"name": "vol", "mountPath": mount}],
                 }
@@ -898,10 +909,25 @@ def data_ls(
             if phase in ("Succeeded", "Failed"):
                 break
             time.sleep(1)
-        out = core.read_namespaced_pod_log(name=pod_name, namespace=ns)
-        _echo(out)
+        if phase == "Pending":
+            _err(
+                f"helper Pod {timeout}s 内没起来(仍 Pending):多半是镜像没拉到或没排上"
+                f"节点,而不是路径问题。可加大 --timeout 重试。"
+            )
+            return
+        out = ""
+        try:
+            out = core.read_namespaced_pod_log(name=pod_name, namespace=ns)
+        except ApiException:
+            pass
+        if out.strip():
+            _echo(out)
         if phase == "Failed":
-            _err(f"helper Pod 未成功(phase={phase}),路径可能不存在: {target}")
+            # ls 找不到路径会打印 "No such file"/"cannot access";其余算容器/环境错误。
+            if "No such file" in out or "cannot access" in out:
+                _err(f"路径不存在: {target}")
+            else:
+                _err("helper Pod 执行失败(phase=Failed);以上为容器输出(若为空,多为镜像/环境问题)。")
     except ApiException as exc:
         _err(humanize_api_exception(exc))
     finally:
@@ -912,7 +938,7 @@ def data_ls(
 
 
 def main() -> None:
-    """Console-script entry point (mirrors ``wuji = wuji.cli:app``)."""
+    """Console-script entry point (mirrors ``volcano = volcano.cli:app``)."""
     app()
 
 

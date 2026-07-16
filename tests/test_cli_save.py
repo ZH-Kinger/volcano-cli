@@ -1,4 +1,4 @@
-"""CLI-layer tests for `wuji save` and `wuji images` (sdk mocked out).
+"""CLI-layer tests for `volcano save` and `volcano images` (sdk mocked out).
 
 Uses typer.testing.CliRunner. The sdk functions are patched, and load_clients is
 guarded so nothing touches a real cluster. A team (`-t`) is always passed so
@@ -8,7 +8,7 @@ guarded so nothing touches a real cluster. A team (`-t`) is always passed so
 import pytest
 from typer.testing import CliRunner
 
-import wuji.cli as cli
+import volcano.cli as cli
 
 runner = CliRunner()
 
@@ -21,7 +21,7 @@ def _no_kube(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# wuji save
+# volcano save
 # --------------------------------------------------------------------------- #
 def test_save_no_wait_prints_request_name(monkeypatch):
     captured = {}
@@ -57,8 +57,8 @@ def test_save_success_prints_image_and_reuse_hint(monkeypatch):
     assert result.exit_code == 0, result.output
     assert "acr.io/wuji-rl/myenv:v9" in result.output   # saved image
     assert "wuji-3" in result.output                     # node
-    assert "wuji dev" in result.output                   # reuse hint
-    assert "wuji train" in result.output
+    assert "volcano dev" in result.output                   # reuse hint
+    assert "volcano train" in result.output
 
 
 def test_save_threads_worker_container_timeout(monkeypatch):
@@ -104,7 +104,7 @@ def test_save_requires_tag(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# wuji images
+# volcano images
 # --------------------------------------------------------------------------- #
 def test_images_empty_prints_hint(monkeypatch):
     monkeypatch.setattr(cli.sdk, "list_images", lambda team=None: [])
@@ -123,7 +123,7 @@ def test_images_lists_rows(monkeypatch):
     assert result.exit_code == 0, result.output
     assert "base-a:v1" in result.output
     assert "mine-z:v1" in result.output
-    assert "wuji dev" in result.output  # usage footer
+    assert "volcano dev" in result.output  # usage footer
 
 
 def test_images_team_flag_threaded(monkeypatch):

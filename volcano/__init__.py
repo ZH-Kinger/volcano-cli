@@ -1,10 +1,10 @@
-"""wuji — a tiny CLI/SDK to submit training jobs as Volcano Jobs.
+"""volcano — a tiny CLI/SDK to submit training jobs as Volcano Jobs.
 
 Usage as an SDK::
 
-    import wuji
+    import volcano
 
-    job = wuji.submit(
+    job = volcano.submit(
         name="my-run",
         team="wuji-rl",
         image="wuji-rl-acr-registry.cn-huhehaote.cr.aliyuncs.com/wuji-rl/<你的镜像>:<tag>",
@@ -12,9 +12,9 @@ Usage as an SDK::
         command="python train.py",
         data="datasets/imagenet",
     )
-    print(wuji.list_jobs(team="wuji-rl"))
+    print(volcano.list_jobs(team="wuji-rl"))
 
-The same functions back the ``wuji`` command line tool (see ``wuji.cli``).
+The same functions back the ``volcano`` command line tool (see ``volcano.cli``).
 """
 
 from __future__ import annotations
@@ -33,4 +33,4 @@ __all__ = [
     "build_volcano_job",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

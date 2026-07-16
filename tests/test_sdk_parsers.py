@@ -1,4 +1,4 @@
-"""Unit tests for wuji.sdk resource-quantity parsers + _job_gpus.
+"""Unit tests for volcano.sdk resource-quantity parsers + _job_gpus.
 
 Covers _gpu, _cpu_to_m (m-suffix / integer x1000 / bad input -> 0),
 _mem_to_gi (Ki/Mi/Gi/Ti + plain bytes + bad input), and _job_gpus
@@ -7,7 +7,7 @@ _mem_to_gi (Ki/Mi/Gi/Ti + plain bytes + bad input), and _job_gpus
 
 import pytest
 
-from wuji.sdk import _cpu_to_m, _gpu, _job_gpus, _mem_to_gi
+from volcano.sdk import _cpu_to_m, _gpu, _job_gpus, _mem_to_gi
 
 
 # --------------------------------------------------------------------------- #

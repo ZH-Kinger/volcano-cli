@@ -1,4 +1,4 @@
-"""Unit tests for wuji.job.build_volcano_job — pure manifest logic, no cluster.
+"""Unit tests for volcano.job.build_volcano_job — pure manifest logic, no cluster.
 
 Covers: command wrapping (bash -lc vs -c), SSH prologue injection, --data /
 --shared-data path resolution (leading-slash stripping) and env injection,
@@ -10,7 +10,7 @@ import shlex
 
 import pytest
 
-from wuji.job import (
+from volcano.job import (
     DATASETS_MOUNT,
     WORKSPACE_MOUNT,
     _DIST_PROLOGUE,

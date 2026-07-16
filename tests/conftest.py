@@ -1,7 +1,7 @@
 """Shared test setup.
 
 Put the package root (the ``cli-py`` dir that contains ``wuji/``) on sys.path so
-``import wuji`` works under pytest's default prepend import mode without needing
+``import volcano`` works under pytest's default prepend import mode without needing
 an editable install. Only this tests/ tree is touched — no source/config edits.
 """
 

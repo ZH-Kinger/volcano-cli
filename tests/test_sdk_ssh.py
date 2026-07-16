@@ -1,4 +1,4 @@
-"""Unit tests for the SSH NodePort surface in wuji.sdk.
+"""Unit tests for the SSH NodePort surface in volcano.sdk.
 
 _create_ssh_service body structure (NodePort, selector, ports, pinned nodePort),
 ssh_endpoint resolution (svc nodePort + pod's node + node public-ip annotation,
@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from kubernetes.client.exceptions import ApiException
 
-import wuji.sdk as sdk
+import volcano.sdk as sdk
 
 
 class FakeCore:

@@ -1,11 +1,11 @@
-"""Unit tests for wuji.sdk.list_jobs kind filtering + kind field.
+"""Unit tests for volcano.sdk.list_jobs kind filtering + kind field.
 
 The kubernetes CustomObjects client is mocked — no cluster.
 """
 
 import pytest
 
-import wuji.sdk as sdk
+import volcano.sdk as sdk
 
 
 def _item(name, kind=None, gpus="8", replicas=1):
