@@ -19,11 +19,46 @@
 
 ## 安装
 
+前提:Python 3.9+。三选一。
+
+**方式 A — 从 GitHub 直接安装(推荐,零额外基建)**
+
 ```bash
-cd scheduler-platform/cli-py
-pip install -e .            # 纯文本输出
-pip install -e ".[rich]"   # 想要漂亮表格就装 rich
+pip install "git+https://github.com/ZH-Kinger/volcano-cli.git"
+# 想要漂亮的彩色表格输出(wuji top/queue/list 更好看),装 rich extra:
+pip install "wuji[rich] @ git+https://github.com/ZH-Kinger/volcano-cli.git"
 ```
+
+> 国内网络直连 GitHub 可能较慢/不稳,若卡住可挂代理或改用方式 B 离线 wheel。
+
+**方式 B — 用 wheel 离线/内网安装**
+
+```bash
+# 管理员把 wuji-0.1.0-py3-none-any.whl 发给你后:
+pip install wuji-0.1.0-py3-none-any.whl
+pip install "wuji-0.1.0-py3-none-any.whl[rich]"
+```
+
+**方式 C — 源码开发安装(想改 CLI 的人)**
+
+```bash
+git clone https://github.com/ZH-Kinger/volcano-cli.git
+cd volcano-cli
+pip install -e ".[rich]"
+```
+
+**验证安装成功**
+
+```bash
+wuji --help        # 能列出 submit/train/dev/list/logs/save/images 等命令即 OK
+```
+
+### 安装后的前提(不满足命令会失败)
+
+1. 本机要有一份**团队作用域的 kubeconfig**(管理员用 `add-team.sh` 开通团队时下发);或每条命令都带 `--team <团队名>`。**不要用没设默认 namespace 的 admin kubeconfig**——否则任务落到 `default` namespace,而 `default` 没有 NAS PVC,pod 会 FailedMount 卡住。
+2. 本机需装 `kubectl` 和 `ssh`(`wuji exec` / `ssh` / `forward` 依赖它们)。
+3. 团队须已被管理员开通(存在 `<team>-nas` PVC),否则挂载失败。
+4. apiserver 公网端点可直连(集群已放开)。
 
 ## 认证(自动双模)
 
