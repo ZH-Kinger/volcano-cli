@@ -26,13 +26,19 @@ DEFAULT_DSHM_SIZE = "64Gi"
 Command = Union[str, List[str]]
 
 # 提交时开 --ssh 会把这段前置到命令里:设 root 密码/公钥 + 起 sshd,再跑训练命令。
-# 需要镜像自带 openssh-server;缺失时尽力用 apt 安装,失败也不影响训练(继续跑)。
+# 需要镜像自带 openssh-server;缺失时尽力用 apt 安装(先把源换成阿里云镜像,解决国内
+# 连 ubuntu/debian 官方源极慢甚至卡死的问题),失败也不影响训练(继续跑)。
 # 有密码 → 开口令登录;只给公钥 → 关口令登录(仅密钥,更安全)。
 # ssh-keygen -A 生成主机密钥,否则某些精简镜像上 sshd 会起不来。
 _SSH_PROLOGUE = (
     'if [ -n "$WUJI_SSH_PASSWORD" ] || [ -n "$WUJI_SSH_PUBKEY" ]; then\n'
-    '  command -v sshd >/dev/null 2>&1 || '
-    '{ apt-get update >/dev/null 2>&1 && apt-get install -y openssh-server >/dev/null 2>&1; } || true\n'
+    '  command -v sshd >/dev/null 2>&1 || { '
+    'sed -i "s|archive.ubuntu.com|mirrors.aliyun.com|g; s|security.ubuntu.com|mirrors.aliyun.com|g; '
+    's|ports.ubuntu.com|mirrors.aliyun.com|g; s|deb.debian.org|mirrors.aliyun.com|g; '
+    's|security.debian.org|mirrors.aliyun.com|g" '
+    '/etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources '
+    '/etc/apt/sources.list.d/debian.sources 2>/dev/null; '
+    'apt-get update && apt-get install -y openssh-server; } >/dev/null 2>&1 || true\n'
     '  mkdir -p /run/sshd /var/run/sshd ~/.ssh 2>/dev/null || true\n'
     '  chmod 700 ~/.ssh 2>/dev/null || true\n'
     '  ssh-keygen -A 2>/dev/null || true\n'
