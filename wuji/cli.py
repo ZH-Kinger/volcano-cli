@@ -366,7 +366,7 @@ def save(
     name: str = typer.Argument(..., help="要保存的开发机 / 任务名。"),
     tag: str = typer.Option(
         ..., "--tag",
-        help="目标镜像。裸名 myenv:v1 会自动补成 ACR 地址;也可给完整 registry 地址。",
+        help="镜像短名(如 myenv:v1),自动存到你团队专属的 ACR 空间;不要带 registry 地址。",
     ),
     team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
     worker: int = typer.Option(0, "--worker", help="第几个 worker(多机);默认 0。"),
