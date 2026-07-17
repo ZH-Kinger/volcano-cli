@@ -3,6 +3,8 @@
 把训练任务或交互式开发机提交成 **Volcano Job**,跑在 ACK Edge GPU 集群上。既是命令行工具
 (`volcano ...`),也是 Python SDK(`import volcano`)。
 
+> `vc` 是 `volcano` 的等价短别名,下文所有 `volcano ...` 都可写成 `vc ...`(如 `vc ls`、`vc top`)。
+
 ## 它替你处理了什么
 
 - `schedulerName: volcano` + `queue` + gang 调度(`minAvailable = nodes`)。
@@ -34,9 +36,9 @@ pip install "volcano[rich] @ git+https://github.com/ZH-Kinger/volcano-cli.git"
 **方式 B — 用 wheel 离线/内网安装**
 
 ```bash
-# 管理员把 volcano-0.2.0-py3-none-any.whl 发给你后:
-pip install volcano-0.2.0-py3-none-any.whl
-pip install "volcano-0.2.0-py3-none-any.whl[rich]"
+# 管理员把 volcano-0.4.0-py3-none-any.whl 发给你后:
+pip install volcano-0.4.0-py3-none-any.whl
+pip install "volcano-0.4.0-py3-none-any.whl[rich]"
 ```
 
 **方式 C — 源码开发安装(想改 CLI 的人)**
@@ -50,8 +52,22 @@ pip install -e ".[rich]"
 **验证安装成功**
 
 ```bash
-volcano --help        # 能列出 submit/train/dev/list/logs/save/images 等命令即 OK
+volcano --help        # 能列出 login/train/dev/list/logs/save/images 等命令即 OK
+vc --help             # vc 是等价短别名
 ```
+
+### 登录(拿到 kubeconfig 后的第一步)
+
+管理员开通团队时给你一份 kubeconfig,用 `volcano login` 写到默认位置,之后 `volcano` / `kubectl`
+免设 `KUBECONFIG` 直接用:
+
+```bash
+volcano login -f 我的.kubeconfig     # 从文件读
+volcano login                        # 或直接运行,粘贴内容(结束:Unix Ctrl-D / Windows Ctrl-Z 回车)
+```
+
+写到 `~/.kube/config`(`--dest` 改路径);已存在会先自动备份成 `config.bak.<时间戳>`(`--force` 跳过备份直接覆盖)。
+成功后打印当前 context 和默认 namespace。
 
 ### 安装后的前提(不满足命令会失败)
 
@@ -77,11 +93,12 @@ namespace > `default`。
 
 | 命令 | 作用 |
 |---|---|
+| `volcano login [-f 文件]` | 把 kubeconfig 写到 `~/.kube/config`(拿到 kubeconfig 后第一步) |
 | `volcano train ...` | 提交训练任务(DLC:跑完即退出;支持多机;`volcano submit` 是隐藏别名) |
 | `volcano dev ...` | 起开发机(DSW:默认 1 卡 + 长驻 `tail -f /dev/null`,进去交互调试) |
 | `volcano save <名> --tag <镜像>` | 把活容器提交成镜像推 ACR(平台代做,用户零 docker/凭据) |
 | `volcano images [--mine\|-t]` | 列可直接拉取的镜像(base 基础镜像 + saved 团队保存) |
-| `volcano list [dev\|train]` | 列本团队任务(别名 `volcano ls`) |
+| `volcano list [dev\|train]` | 列本团队任务(别名 `volcano ls`;`-A` 列全部 namespace) |
 | `volcano status <名>` | 看某任务 phase + 各 Pod + 资源 |
 | `volcano logs <名> [-f]` | 看日志(`--worker N` / `--pod <名>` / `--all`) |
 | `volcano exec <名> [-- CMD]` | 进容器交互 shell(默认 bash;需本机 kubectl) |
@@ -93,6 +110,24 @@ namespace > `default`。
 | `volcano queue` | 各 Volcano 队列的 GPU/CPU/内存 配额与用量 |
 | `volcano data ls [子路径] [--shared]` | 列 NAS(`/workspace`)或共享数据集(`/datasets`) |
 
+`volcano list -A`(或 `-a`)列出**所有 namespace** 的任务,多一列 NS;admin 和普通用户都能用(只读全局可见)。
+
+### 短参速查
+
+| 短 | 长 | 含义 |
+|---|---|---|
+| `-n` | `--name` | 任务名 |
+| `-t` | `--team` | 团队 = namespace |
+| `-i` | `--image` | 镜像地址 |
+| `-g` | `--gpus` | 每 worker GPU 数 |
+| `-q` | `--queue` | Volcano 队列 |
+| `-c` | `--cpu` | CPU 限额 |
+| `-m` | `--memory` | 内存限额 |
+| `-d` | `--data` | 相对 `/workspace` 的数据路径 |
+| `-w` | `--worker` | 第几个 worker(`logs`/`exec`/`ssh`/`forward`/`save`) |
+| `-f` | `--follow` / `--file` | `logs` 跟随 / `login` 读文件 |
+| `-A` `-a` | `--all-namespaces` | `list` 列全部 namespace |
+
 ## train vs dev
 
 - **`volcano train`**(旧名 `volcano submit`,仍可用):训练任务,命令跑完即退出;默认 8 卡;
@@ -103,8 +138,8 @@ namespace > `default`。
 两者共享几乎全部参数(见下)。
 
 ```bash
-# 训练:单机 8 卡(命令放在 -- 之后)
-volcano train --name my-run --queue shared \
+# 训练:单机 8 卡(命令放在 -- 之后;不写 --queue 默认进 default 池)
+volcano train --name my-run \
   --image wuji-rl-acr-registry.cn-huhehaote.cr.aliyuncs.com/wuji-rl/<你的镜像>:<tag> \
   --gpus 8 --data mydata/ds -- python train.py --epochs 3
 
@@ -124,7 +159,7 @@ volcano exec mydev             # 进容器
 | `--name` | 任务名(合法 k8s 名) | 必填 |
 | `--image` `-i` | ACR 镜像完整地址 | 必填 |
 | `--team` `-t` | 团队 = namespace | 当前 context |
-| `--queue` `-q` | Volcano 队列 | `shared` |
+| `--queue` `-q` | Volcano 队列(`default` 通用池,或 `wuji-queue-1..5` 限额队列各 8 卡) | `default` |
 | `--gpus` `-g` | 每 worker GPU 数 | train `8` / dev `1` |
 | `--nodes` | worker 数 = gang minAvailable(仅 `train`) | `1` |
 | `--cpu` `-c` / `--memory` `-m` | 每 worker CPU / 内存限额 | `16` / `64Gi` |
@@ -203,7 +238,7 @@ volcano train --name run1 -i wuji-rl-acr-registry.cn-huhehaote.cr.aliyuncs.com/w
 import volcano
 
 volcano.submit(
-    name="my-run", team="wuji-rl", queue="shared",
+    name="my-run", team="wuji-rl", queue="default",
     image="wuji-rl-acr-registry.cn-huhehaote.cr.aliyuncs.com/wuji-rl/<你的镜像>:<tag>",
     gpus=8, nodes=1,
     command="python train.py",          # 或 ["python", "train.py"]
@@ -226,13 +261,14 @@ for r in volcano.list_images(team="wuji-rl"):
 
 # 只生成 manifest 不提交:
 from volcano import build_volcano_job
-manifest = build_volcano_job(name="x", team="wuji-rl", queue="shared",
+manifest = build_volcano_job(name="x", team="wuji-rl", queue="default",
                              image="<镜像>", gpus=8, command="python train.py")
 ```
 
 ## 备注
 
-- 队列(如 `shared` / `pilot`)由管理员用 `scheduling.volcano.sh/v1beta1 Queue` 预建,提交时
-  `--queue` 指定。
+- 队列由管理员用 `scheduling.volcano.sh/v1beta1 Queue` 预建:`default`(通用池,不写 `--queue`
+  默认落这)+ `wuji-queue-1..5`(各限 8 卡,用 `-q wuji-queue-N` 走限额)。旧的 `shared` / `pilot`
+  已废弃删除。
 - `volcano data ls` 在集群外无法直接读 NFS,会起一个短命 helper Pod 挂对应 PVC 跑 `ls`,取日志后删掉。
 - 没连集群 / 没 kubeconfig 时,命令给出清晰的中文报错而不是抛栈。
