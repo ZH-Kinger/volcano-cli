@@ -45,20 +45,43 @@ def test_save_no_wait_prints_request_name(monkeypatch):
     assert "acr.io/wuji-rl/myenv:v1" in result.output  # target image shown
 
 
-def test_save_success_prints_image_and_reuse_hint(monkeypatch):
+def test_save_wait_prints_image_and_reuse_hint(monkeypatch):
+    # v0.12.0: foreground path now requires --wait (default is background).
     monkeypatch.setattr(cli.sdk, "save_image", lambda name, **kw: {
         "request": "req-1", "image": "acr.io/wuji-rl/myenv:v9",
         "status": "Succeeded", "node": "wuji-3", "message": "pushed",
     })
     result = runner.invoke(
         cli.app,
-        ["save", "j", "--tag", "myenv:v9", "-t", "teamx"],
+        ["save", "j", "--tag", "myenv:v9", "-t", "teamx", "--wait"],
     )
     assert result.exit_code == 0, result.output
+    assert "✅ 已保存并推送" in result.output              # foreground success line
     assert "acr.io/wuji-rl/myenv:v9" in result.output   # saved image
     assert "wuji-3" in result.output                     # node
     assert "volcano dev" in result.output                   # reuse hint
     assert "volcano train" in result.output
+    # foreground must NOT emit the background-submission banner
+    assert "已提交后台保存" not in result.output
+
+
+def test_save_default_success_prints_background_hint(monkeypatch):
+    # v0.12.0: with no flag the command now returns immediately (background).
+    monkeypatch.setattr(cli.sdk, "save_image", lambda name, **kw: {
+        "request": "req-1", "image": "acr.io/wuji-rl/myenv:v9",
+        "status": "Pending", "node": "", "message": "",
+    })
+    result = runner.invoke(
+        cli.app,
+        ["save", "j", "--tag", "myenv:v9", "-t", "teamx"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "已提交后台保存" in result.output               # background banner
+    assert "req-1" in result.output                       # request name
+    assert "acr.io/wuji-rl/myenv:v9" in result.output     # target image
+    assert "volcano images --mine" in result.output       # progress hint
+    # background path must NOT emit the foreground success line
+    assert "✅ 已保存并推送" not in result.output
 
 
 def test_save_threads_worker_container_timeout(monkeypatch):

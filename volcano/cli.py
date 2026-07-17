@@ -706,34 +706,41 @@ def save(
     container: str = typer.Option(
         "worker", "--container", help="容器名(volcano 起的任务默认是 worker)。"
     ),
-    no_wait: bool = typer.Option(
-        False, "--no-wait", help="只提交保存请求,不等待完成(自己稍后查状态)。"
+    wait: bool = typer.Option(
+        False, "--wait", help="前台等待 saver 完成再返回(默认:后台提交、立即返回、不占终端)。"
     ),
-    timeout: int = typer.Option(1800, "--timeout", help="等待 saver 完成的最长秒数。"),
+    no_wait: bool = typer.Option(
+        False, "--no-wait", hidden=True, help="(已是默认行为,保留兼容;无额外效果)。"
+    ),
+    timeout: int = typer.Option(1800, "--timeout", help="加了 --wait 时,前台等待的最长秒数。"),
 ) -> None:
-    """把正在运行的容器提交成镜像并推到 ACR。
+    """把正在运行的容器提交成镜像并推到 ACR(默认后台进行,不占用你的终端)。
 
     你不需要 docker,也不需要 ACR 凭据:平台的 wuji-saver 组件在容器所在节点用
     containerd 提交并推送(它独占 containerd socket + ACR 写凭据)。你这边只是发一个
-    保存请求。改环境后 `volcano save <名> --tag myenv:v1`,下次 `volcano dev/train -i` 直接用。
+    保存请求,saver 在后台 commit+push;想守着看完就加 `--wait`。改环境后
+    `volcano save <名> --tag myenv:v1`,下次 `volcano dev/train -i` 直接用。
     """
     try:
         result = sdk.save_image(
             name, tag=tag, team=team, worker=worker, container=container,
-            wait=not no_wait, timeout=timeout,
+            wait=wait, timeout=timeout,
         )
     except Exception as exc:  # noqa: BLE001
         _die(exc)
 
     image = result["image"]
     ns = current_namespace(team)
-    if no_wait:
-        _echo(f"已提交保存请求: {result['request']}")
+    if not wait:
+        team_arg = f" -t {team}" if team else ""
+        _echo(f"已提交后台保存(saver 在节点上 commit+push,不占用你的终端): {result['request']}")
         _echo(f"目标镜像: {image}")
+        _echo(f"查看进度: volcano images --mine{team_arg}   (完成后会出现)")
         _echo(
-            f"查看进度: kubectl -n {ns} get cm {result['request']} "
+            f"      或: kubectl -n {ns} get cm {result['request']} "
             "-o jsonpath='{.data.status}'"
         )
+        _echo(f"存好后起环境: volcano dev -n <新开发机>{team_arg} -i {image}")
         return
     _echo(f"✅ 已保存并推送: {image}   (节点 {result.get('node') or '?'})")
     _echo("下次直接拿它起环境:")
