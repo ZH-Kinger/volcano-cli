@@ -118,14 +118,20 @@ def login(
         raise typer.Exit(code=1)
 
     target = pathlib.Path(dest) if dest else pathlib.Path.home() / ".kube" / "config"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() and not force:
-        bak = target.with_name(target.name + ".bak." + strftime("%Y%m%d-%H%M%S", localtime()))
-        shutil.copy2(target, bak)
-        _echo(f"已备份原 kubeconfig -> {bak}")
-    target.write_text(content, encoding="utf-8")
     try:
-        os.chmod(target, 0o600)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and not force:
+            bak = target.with_name(
+                target.name + ".bak." + strftime("%Y%m%d-%H%M%S", localtime())
+            )
+            shutil.copy2(target, bak)
+            _echo(f"已备份原 kubeconfig -> {bak}")
+        target.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        _err(f"写入 {target} 失败: {exc}")
+        raise typer.Exit(code=1)
+    try:
+        os.chmod(target, 0o600)  # POSIX 生效;Windows 上是 no-op
     except OSError:
         pass
 

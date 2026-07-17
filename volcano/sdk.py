@@ -46,7 +46,7 @@ def submit(
     *,
     name: str,
     team: Optional[str] = None,
-    queue: str = "shared",
+    queue: str = "default",
     image: str,
     command: Command,
     gpus: int = 8,

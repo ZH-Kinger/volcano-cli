@@ -134,7 +134,7 @@ def build_volcano_job(
     Args:
         name: job name (must be a valid k8s name).
         team: team = target namespace; the NAS PVC is ``<team>-nas``.
-        queue: Volcano queue to submit into (e.g. ``shared`` / ``pilot``).
+        queue: Volcano queue to submit into (e.g. ``default`` / ``wuji-queue-1``).
         image: full ACR image reference.
         gpus: GPUs per worker (``nvidia.com/gpu`` limit). Defaults to 8.
         nodes: number of worker replicas; also ``minAvailable`` (gang). Default 1.
