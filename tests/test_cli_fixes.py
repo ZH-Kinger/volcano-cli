@@ -197,7 +197,7 @@ def test_queue_prints_scheduler_hint(monkeypatch):
 # fix 4: `list` empty result prints the native-Job hint
 # --------------------------------------------------------------------------- #
 def test_list_empty_prints_hint(monkeypatch):
-    monkeypatch.setattr(cli.sdk, "list_jobs", lambda team=None, kind=None: [])
+    monkeypatch.setattr(cli.sdk, "list_jobs", lambda team=None, kind=None, all_namespaces=False: [])
     result = runner.invoke(cli.app, ["list", "-t", "teamx"])
     assert result.exit_code == 0, result.output
     assert "(空)注意" in result.output
@@ -207,7 +207,7 @@ def test_list_empty_prints_hint(monkeypatch):
 def test_list_nonempty_no_hint(monkeypatch):
     monkeypatch.setattr(
         cli.sdk, "list_jobs",
-        lambda team=None, kind=None: [
+        lambda team=None, kind=None, all_namespaces=False: [
             {"name": "a", "kind": "train", "phase": "Running",
              "queue": "shared", "gpus": 8, "age": "1m"}
         ],

@@ -257,7 +257,7 @@ def train(
         None, metavar="[-- CMD ...]",
         help="训练命令,放在 -- 之后,例如: -- python train.py --epochs 3",
     ),
-    name: str = typer.Option(..., "--name", help="任务名(合法 k8s 名)。"),
+    name: str = typer.Option(..., "--name", "-n", help="任务名(合法 k8s 名)。"),
     team: Optional[str] = typer.Option(
         None, "--team", "-t", help="团队=namespace(默认取当前 context)。"
     ),
@@ -265,7 +265,7 @@ def train(
     image: str = typer.Option(..., "--image", "-i", help="ACR 镜像完整地址。"),
     gpus: int = typer.Option(8, "--gpus", "-g", help="每个 worker 的 GPU 数。"),
     nodes: int = typer.Option(1, "--nodes", help="worker 数(=minAvailable,多机分布式)。"),
-    data: Optional[str] = typer.Option(None, "--data", help="相对 /workspace 的数据路径。"),
+    data: Optional[str] = typer.Option(None, "--data", "-d", help="相对 /workspace 的数据路径。"),
     shared_data: Optional[str] = typer.Option(
         None, "--shared-data", help="相对 /datasets 的共享只读数据集路径。"
     ),
@@ -313,12 +313,12 @@ def dev(
         None, metavar="[-- CMD ...]",
         help="容器启动命令(可选);不给则默认长驻 tail -f /dev/null,供你 exec/ssh 进去。",
     ),
-    name: str = typer.Option(..., "--name", help="开发机名(合法 k8s 名)。"),
+    name: str = typer.Option(..., "--name", "-n", help="开发机名(合法 k8s 名)。"),
     team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
     queue: str = typer.Option("shared", "--queue", "-q", help="Volcano 队列。"),
     image: str = typer.Option(..., "--image", "-i", help="ACR 镜像完整地址。"),
     gpus: int = typer.Option(1, "--gpus", "-g", help="GPU 数(开发机默认 1)。"),
-    data: Optional[str] = typer.Option(None, "--data", help="相对 /workspace 的数据路径。"),
+    data: Optional[str] = typer.Option(None, "--data", "-d", help="相对 /workspace 的数据路径。"),
     shared_data: Optional[str] = typer.Option(
         None, "--shared-data", help="相对 /datasets 的共享只读数据集路径。"
     ),
@@ -369,7 +369,7 @@ def save(
         help="镜像短名(如 myenv:v1),自动存到你团队专属的 ACR 空间;不要带 registry 地址。",
     ),
     team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
-    worker: int = typer.Option(0, "--worker", help="第几个 worker(多机);默认 0。"),
+    worker: int = typer.Option(0, "--worker", "-w", help="第几个 worker(多机);默认 0。"),
     container: str = typer.Option(
         "worker", "--container", help="容器名(volcano 起的任务默认是 worker)。"
     ),
@@ -464,25 +464,44 @@ def list_cmd(
         help="只看某类:dev(开发机)/ train(训练);不给则全列。",
     ),
     team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
+    all_namespaces: bool = typer.Option(
+        False, "--all-namespaces", "-A", "-a",
+        help="列出所有 namespace 的任务(管理员;需集群级读权限)。",
+    ),
 ) -> None:
-    """列出本团队的任务;`volcano list dev` / `volcano list train` 分类查看。"""
+    """列出本团队的任务;`volcano list dev` / `volcano list train` 分类查看。
+
+    `-A` 列出全部 namespace(管理员视角,多一列 NS)。
+    """
     if kind and kind not in ("dev", "train"):
         _err("list 的过滤参数只能是 dev 或 train。")
         raise typer.Exit(code=1)
     try:
-        jobs = sdk.list_jobs(team=team, kind=kind)
+        jobs = sdk.list_jobs(team=team, kind=kind, all_namespaces=all_namespaces)
     except Exception as exc:  # noqa: BLE001
         _die(exc)
-    rows = [
-        [j["name"], j.get("kind", "-"), j["phase"], j["queue"], j["gpus"], j["age"]]
-        for j in jobs
-    ]
     scope = kind or "all"
-    _print_table(
-        f"{scope} vcjobs @ {current_namespace(team)}",
-        ["NAME", "KIND", "PHASE", "QUEUE", "GPUS", "AGE"],
-        rows,
-    )
+    if all_namespaces:
+        rows = [
+            [j.get("namespace", "-"), j["name"], j.get("kind", "-"),
+             j["phase"], j["queue"], j["gpus"], j["age"]]
+            for j in jobs
+        ]
+        _print_table(
+            f"{scope} vcjobs @ 全部 namespace",
+            ["NS", "NAME", "KIND", "PHASE", "QUEUE", "GPUS", "AGE"],
+            rows,
+        )
+    else:
+        rows = [
+            [j["name"], j.get("kind", "-"), j["phase"], j["queue"], j["gpus"], j["age"]]
+            for j in jobs
+        ]
+        _print_table(
+            f"{scope} vcjobs @ {current_namespace(team)}",
+            ["NAME", "KIND", "PHASE", "QUEUE", "GPUS", "AGE"],
+            rows,
+        )
     if not rows:
         _echo(
             "(空)注意:这里只列 volcano 提交的 Volcano Job;"
@@ -525,7 +544,7 @@ def logs(
     follow: bool = typer.Option(False, "-f", "--follow", help="持续跟随日志。"),
     tail: int = typer.Option(200, "--tail", help="非跟随模式下拉取的末尾行数。"),
     worker: Optional[int] = typer.Option(
-        None, "--worker", help="看第几个 worker(多机训练);默认 worker-0/首个 Pod。"
+        None, "--worker", "-w", help="看第几个 worker(多机训练);默认 worker-0/首个 Pod。"
     ),
     pod: Optional[str] = typer.Option(None, "--pod", help="直接指定 Pod 名。"),
     all_workers: bool = typer.Option(
@@ -579,7 +598,7 @@ def exec_cmd(
         None, "--pod", help="指定某个 Pod(多 worker 时);默认第一个 Running 的。"
     ),
     worker: Optional[int] = typer.Option(
-        None, "--worker", help="进第几个 worker(多机训练),等价于 --pod <名>-worker-N。"
+        None, "--worker", "-w", help="进第几个 worker(多机训练),等价于 --pod <名>-worker-N。"
     ),
 ) -> None:
     """进入任务容器(交互式 shell)。
@@ -645,7 +664,7 @@ def ssh_cmd(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
     pod: Optional[str] = typer.Option(None, "--pod", help="指定 Pod;默认第一个 Running。"),
     worker: Optional[int] = typer.Option(
-        None, "--worker", help="进第几个 worker(多机训练)。"
+        None, "--worker", "-w", help="进第几个 worker(多机训练)。"
     ),
     ssh_port: int = typer.Option(22, "--ssh-port", help="容器内 sshd 端口(须与提交时一致)。"),
     local_port: int = typer.Option(2222, "--local-port", help="本地映射端口。"),
@@ -715,7 +734,7 @@ def forward(
     port: int = typer.Argument(..., help="容器端口(如 6006 TensorBoard、8265 Ray Dashboard)。"),
     team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
     pod: Optional[str] = typer.Option(None, "--pod", help="指定 Pod;默认第一个 Running。"),
-    worker: Optional[int] = typer.Option(None, "--worker", help="第几个 worker(多机)。"),
+    worker: Optional[int] = typer.Option(None, "--worker", "-w", help="第几个 worker(多机)。"),
     local_port: Optional[int] = typer.Option(None, "--local-port", help="本地端口(默认同容器端口)。"),
 ) -> None:
     """把容器端口转发到本地(访问 TensorBoard / Ray Dashboard 等)。前台运行,Ctrl+C 结束。"""

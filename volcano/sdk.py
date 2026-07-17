@@ -685,28 +685,38 @@ def list_images(
 
 
 def list_jobs(
-    *, team: Optional[str] = None, kind: Optional[str] = None
+    *, team: Optional[str] = None, kind: Optional[str] = None,
+    all_namespaces: bool = False,
 ) -> List[Dict[str, Any]]:
-    """List Volcano Jobs in the team namespace.
+    """List Volcano Jobs in the team namespace (or all namespaces).
 
     Args:
         team: namespace override.
         kind: if given ("dev"/"train"), only return jobs with that
             ``wuji.io/kind`` label. Jobs with no kind label match neither
             filter (they are only shown by an unfiltered list).
+        all_namespaces: if True, list across every namespace (admin view;
+            needs cluster-level list on volcano jobs) instead of one team ns.
 
     Returns:
-        A list of ``{name, phase, queue, gpus, kind, age}`` summary dicts.
+        A list of ``{namespace, name, phase, queue, gpus, kind, age}`` summary dicts.
     """
-    ns = current_namespace(team)
     _, _, custom = load_clients()
     try:
-        resp = custom.list_namespaced_custom_object(
-            group=VOLCANO_JOB_GROUP,
-            version=VOLCANO_JOB_VERSION,
-            namespace=ns,
-            plural=VOLCANO_JOB_PLURAL,
-        )
+        if all_namespaces:
+            resp = custom.list_cluster_custom_object(
+                group=VOLCANO_JOB_GROUP,
+                version=VOLCANO_JOB_VERSION,
+                plural=VOLCANO_JOB_PLURAL,
+            )
+        else:
+            ns = current_namespace(team)
+            resp = custom.list_namespaced_custom_object(
+                group=VOLCANO_JOB_GROUP,
+                version=VOLCANO_JOB_VERSION,
+                namespace=ns,
+                plural=VOLCANO_JOB_PLURAL,
+            )
     except ApiException as exc:
         raise WujiError(humanize_api_exception(exc)) from exc
 
@@ -721,6 +731,7 @@ def list_jobs(
             continue
         out.append(
             {
+                "namespace": meta.get("namespace", "-"),
                 "name": meta.get("name", "?"),
                 "phase": item.get("status", {}).get("state", {}).get("phase", "Unknown"),
                 "queue": spec.get("queue", "-"),

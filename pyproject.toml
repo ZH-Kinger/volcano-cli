@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "volcano"
-version = "0.3.0"
+version = "0.4.0"
 description = "volcano — submit ML/RL training jobs as Volcano Jobs on the ACK Edge GPU cluster"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -20,6 +20,7 @@ rich = ["rich>=13.0"]
 
 [project.scripts]
 volcano = "volcano.cli:main"
+vc = "volcano.cli:main"
 
 [tool.setuptools]
 packages = ["volcano"]

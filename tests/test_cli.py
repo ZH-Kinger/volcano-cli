@@ -185,7 +185,7 @@ def test_list_short_team_flag(monkeypatch):
     seen = {}
     monkeypatch.setattr(
         cli.sdk, "list_jobs",
-        lambda team=None, kind=None: (seen.update(team=team, kind=kind), [])[1],
+        lambda team=None, kind=None, all_namespaces=False: (seen.update(team=team, kind=kind), [])[1],
     )
     result = runner.invoke(cli.app, ["list", "-t", "teamx"])
     assert result.exit_code == 0, result.output
@@ -349,7 +349,7 @@ def test_dev_dry_run_manifest(monkeypatch):
 def test_list_rejects_invalid_kind(monkeypatch):
     called = {"n": 0}
     monkeypatch.setattr(cli.sdk, "list_jobs",
-                        lambda team=None, kind=None: called.__setitem__("n", 1) or [])
+                        lambda team=None, kind=None, all_namespaces=False: called.__setitem__("n", 1) or [])
     result = runner.invoke(cli.app, ["list", "foo"])
     assert result.exit_code == 1
     assert called["n"] == 0  # rejected before hitting the SDK
@@ -359,7 +359,7 @@ def test_list_dev_passes_kind(monkeypatch):
     seen = {}
     monkeypatch.setattr(
         cli.sdk, "list_jobs",
-        lambda team=None, kind=None: (seen.update(team=team, kind=kind), [])[1],
+        lambda team=None, kind=None, all_namespaces=False: (seen.update(team=team, kind=kind), [])[1],
     )
     result = runner.invoke(cli.app, ["list", "dev", "-t", "teamx"])
     assert result.exit_code == 0, result.output
@@ -370,7 +370,7 @@ def test_list_train_passes_kind(monkeypatch):
     seen = {}
     monkeypatch.setattr(
         cli.sdk, "list_jobs",
-        lambda team=None, kind=None: (seen.update(kind=kind), [
+        lambda team=None, kind=None, all_namespaces=False: (seen.update(kind=kind), [
             {"name": "a", "kind": "train", "phase": "Running", "queue": "shared",
              "gpus": 8, "age": "t"}
         ])[1],
