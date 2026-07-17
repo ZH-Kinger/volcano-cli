@@ -25,6 +25,25 @@ data_app = typer.Typer(help="查看 NAS / 共享数据集里的数据。", no_ar
 app.add_typer(data_app, name="data")
 
 
+def _version_callback(value: bool) -> None:
+    """``--version`` eager 回调:打印版本号并退出。"""
+    if value:
+        from . import __version__
+
+        typer.echo(f"volcano {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(
+        False, "--version", "-V", callback=_version_callback, is_eager=True,
+        help="打印版本号并退出。",
+    ),
+) -> None:
+    """volcano — 把训练任务提交成 Volcano Job(ACK Edge GPU 集群)。"""
+
+
 # --------------------------------------------------------------------------- #
 # output helpers (rich is optional)
 # --------------------------------------------------------------------------- #
@@ -751,6 +770,23 @@ def save(
 # --------------------------------------------------------------------------- #
 # images — 可拉取的镜像清单(平台索引,免 ACR 凭据)
 # --------------------------------------------------------------------------- #
+def _is_recommended_base(image: str) -> bool:
+    """是否为"推荐公共基础镜像"。
+
+    判据:平台公共库(``.../wuji-rl/wuji-rl/*``,即我们 save 的 ubuntu-sshd /
+    pytorch-sshd / pytorch-devel-sshd / pytorch-devbox / base-torch-ssh)+ docker.io
+    通用镜像(``ubuntu:`` / ``pytorch/pytorch:``)。各团队工作镜像(``.../wuji-rl/<repo>``
+    单层前缀,如 wuji-mjlab、ecrl 等)被 acr-sync 自动收成 base,但不算"推荐"。
+    """
+    if not isinstance(image, str):  # 与 sdk 防御一致:非法(非字符串)image 不得崩命令
+        return False
+    return (
+        "/wuji-rl/wuji-rl/" in image
+        or image.startswith("ubuntu:")
+        or image.startswith("pytorch/pytorch:")
+    )
+
+
 @app.command()
 @app.command("img", hidden=True)
 def images(
@@ -778,11 +814,23 @@ def images(
     # 一行一个完整镜像地址(方便直接复制给 -i);不用表格,避免长地址被终端宽度截断。
     base = [r for r in rows if r["kind"] == "base"]
     saved = [r for r in rows if r["kind"] != "base"]
-    _echo(f"可拉取镜像:base {len(base)} 个,saved(团队保存){len(saved)} 个")
-    if base:
+    # 策展:推荐公共 base 置顶,团队/历史工作镜像归到"其它"
+    rec = [r for r in base if _is_recommended_base(r["image"])]
+    other = [r for r in base if not _is_recommended_base(r["image"])]
+    # 推荐里:平台公共库(wuji-rl/wuji-rl)优先,其次 docker.io 通用
+    rec.sort(key=lambda r: (0 if "/wuji-rl/wuji-rl/" in r["image"] else 1, r["image"]))
+    _echo(
+        f"可拉取镜像:推荐 {len(rec)}、其它基础 {len(other)}、团队保存 {len(saved)}"
+    )
+    if rec:
         _echo("")
-        _echo("── 基础镜像(base)──")
-        for r in base:
+        _echo("⭐ 推荐基础镜像(开箱即用;带 sshd 的起完可直接 volcano ssh)")
+        for r in rec:
+            _echo(f"  {r['image']}")
+    if other:
+        _echo("")
+        _echo("── 其它基础镜像(各团队/历史,acr-sync 自动收录)──")
+        for r in other:
             _echo(f"  {r['image']}")
     if saved:
         _echo("")
