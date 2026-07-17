@@ -1812,3 +1812,144 @@ def set_queue(
     except ApiException as exc:
         raise WujiError(humanize_api_exception(exc)) from exc
     return {"name": name, "created": existing is None, "queue": get_queue_one(name)}
+
+
+# --------------------------------------------------------------------------- #
+# grant-admin — 【管理员】把某人设为平台管理员(能用 register/set/set-queue)
+# --------------------------------------------------------------------------- #
+_VOLCANO_ADMIN_ROLE = "volcano-admin"
+
+# 收敛的平台管理员角色:开团队(register)+ 配额(set/set-queue)所需的最小集合。
+# 与 platform/volcano-admin-clusterrole.yaml 保持一致。
+_VOLCANO_ADMIN_RULES = [
+    {
+        "apiGroups": [""],
+        "resources": [
+            "namespaces", "resourcequotas", "persistentvolumes", "serviceaccounts",
+            "secrets", "configmaps", "services", "pods", "pods/log", "events",
+        ],
+        "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+    },
+    {
+        "apiGroups": [""],
+        "resources": ["persistentvolumeclaims"],
+        "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+    },
+    {
+        "apiGroups": ["rbac.authorization.k8s.io"],
+        "resources": ["roles", "rolebindings", "clusterroles", "clusterrolebindings"],
+        "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+    },
+    {
+        "apiGroups": ["scheduling.volcano.sh"],
+        "resources": ["queues", "podgroups"],
+        "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+    },
+    {
+        "apiGroups": ["batch.volcano.sh"],
+        "resources": ["jobs", "jobs/status"],
+        "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+    },
+    {
+        "apiGroups": ["authorization.k8s.io"],
+        "resources": ["selfsubjectaccessreviews"],
+        "verbs": ["create"],
+    },
+]
+
+
+def grant_admin(
+    namespace: str,
+    *,
+    sa: Optional[str] = None,
+    revoke: bool = False,
+    cluster_admin: bool = False,
+) -> Dict[str, Any]:
+    """Admin-only: make a person (their namespace's SA) a platform admin.
+
+    Ensures the shared ``volcano-admin`` ClusterRole exists (create-or-patch to the
+    minimal rules needed for register/set/set-queue), then binds ``<namespace>``'s
+    ServiceAccount to it via a ClusterRoleBinding ``<namespace>-admin``. Their
+    existing kubeconfig gains admin power immediately (same token). With
+    ``cluster_admin`` it binds the built-in ``cluster-admin`` (full power) instead.
+    With ``revoke`` it removes the binding.
+
+    Args:
+        namespace: the person's namespace (its SA, named ``sa`` or ``namespace``,
+            is the subject). sa: SA name override (defaults to ``namespace``).
+        revoke: remove admin instead of granting. cluster_admin: bind cluster-admin.
+
+    Returns:
+        ``{namespace, sa, role, binding}`` on grant, ``{namespace, revoked: True}``
+        on revoke.
+
+    Raises:
+        WujiError: if the caller isn't an admin, or on any API failure.
+    """
+    namespace = (namespace or "").strip()
+    if not _TEAM_NAME_RE.match(namespace) or len(namespace) > 63:
+        raise WujiError(f"namespace {namespace!r} 非法(须是合法 k8s 名)。")
+    sa = (sa or namespace).strip()
+    if not _TEAM_NAME_RE.match(sa) or len(sa) > 63:
+        raise WujiError(f"--sa {sa!r} 非法(须是合法 k8s 名)。")
+    load_clients()
+    _require_admin()
+    rbac = client.RbacAuthorizationV1Api()
+    crb_name = f"{namespace}-admin"
+
+    if revoke:
+        try:
+            rbac.delete_cluster_role_binding(name=crb_name)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise WujiError(humanize_api_exception(exc)) from exc
+        return {"namespace": namespace, "revoked": True}
+
+    role = "cluster-admin" if cluster_admin else _VOLCANO_ADMIN_ROLE
+    if not cluster_admin:
+        # ensure the volcano-admin ClusterRole exists / is up to date (reconcile)
+        cr_body = {"metadata": {"name": _VOLCANO_ADMIN_ROLE}, "rules": _VOLCANO_ADMIN_RULES}
+        try:
+            rbac.create_cluster_role(cr_body)
+        except ApiException as exc:
+            if exc.status == 409:
+                try:
+                    rbac.patch_cluster_role(
+                        name=_VOLCANO_ADMIN_ROLE, body={"rules": _VOLCANO_ADMIN_RULES}
+                    )
+                except ApiException as exc2:
+                    raise WujiError(humanize_api_exception(exc2)) from exc2
+            else:
+                raise WujiError(humanize_api_exception(exc)) from exc
+
+    # 先读现有绑定:roleRef 不可变,不能靠 create 吞 409 静默"更新"(否则降权
+    # cluster-admin→volcano-admin 会静默失败却报成功)。已绑同角色=幂等;不同角色=报错让先 --revoke。
+    try:
+        existing = rbac.read_cluster_role_binding(name=crb_name)
+    except ApiException as exc:
+        if exc.status == 404:
+            existing = None
+        else:
+            raise WujiError(humanize_api_exception(exc)) from exc
+    if existing is not None:
+        cur_role = existing.role_ref.name if existing.role_ref else None
+        if cur_role == role:
+            return {"namespace": namespace, "sa": sa, "role": role,
+                    "binding": crb_name, "unchanged": True}
+        raise WujiError(
+            f"{namespace} 已绑定管理员角色 {cur_role};要改成 {role} 需先撤销再授:"
+            f"`volcano grant-admin {namespace} --revoke` 然后重新 grant(roleRef 不可变)。"
+        )
+
+    crb_body = {
+        "metadata": {"name": crb_name},
+        "roleRef": {
+            "apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": role,
+        },
+        "subjects": [{"kind": "ServiceAccount", "name": sa, "namespace": namespace}],
+    }
+    try:
+        rbac.create_cluster_role_binding(crb_body)
+    except ApiException as exc:
+        raise WujiError(humanize_api_exception(exc)) from exc
+    return {"namespace": namespace, "sa": sa, "role": role, "binding": crb_name}

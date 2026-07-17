@@ -169,6 +169,37 @@ def whoami() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# grant-admin — 【管理员】把某人设为平台管理员
+# --------------------------------------------------------------------------- #
+@app.command(name="grant-admin")
+def grant_admin_cmd(
+    namespace: str = typer.Argument(..., help="要设为管理员的人(namespace);绑定其同名 SA。"),
+    sa: Optional[str] = typer.Option(None, "--sa", help="该 ns 下的 SA 名(默认 = namespace)。"),
+    cluster_admin: bool = typer.Option(
+        False, "--cluster-admin", help="绑内置 cluster-admin(全权);默认绑收敛的 volcano-admin。"
+    ),
+    revoke: bool = typer.Option(False, "--revoke", help="撤销该人的管理员权限。"),
+) -> None:
+    """【管理员】把某人设为平台管理员(能用 register / set / set-queue),或 --revoke 撤销。
+
+    绑定的是该人 namespace 下的 ServiceAccount,所以他**现有的 kubeconfig 立即变管理员**
+    (token 不变,无需重发);对方 `volcano whoami` 会显示"管理员"。默认授收敛的
+    `volcano-admin` 角色(仅开团队/配额所需);`--cluster-admin` 授全权。需要管理员 kubeconfig。
+    """
+    try:
+        result = sdk.grant_admin(
+            namespace, sa=sa, revoke=revoke, cluster_admin=cluster_admin,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _die(exc)
+    if result.get("revoked"):
+        _echo(f"✅ 已撤销 {namespace} 的管理员权限(删除 ClusterRoleBinding)。")
+        return
+    _echo(f"✅ 已把 {namespace}(SA {result['sa']})设为管理员,绑定角色 {result['role']}。")
+    _echo("   对方现有 kubeconfig 即时生效(token 不变);`volcano whoami` 可自检。")
+
+
+# --------------------------------------------------------------------------- #
 # register — 【管理员】一键开通团队 + 生成 kubeconfig
 # --------------------------------------------------------------------------- #
 @app.command()
