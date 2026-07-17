@@ -177,6 +177,7 @@ def _submit_impl(
     shell: str,
     dry_run: bool,
     kind: str,
+    mounts: Optional[List[str]] = None,
 ) -> None:
     """``volcano train`` / ``volcano submit`` / ``volcano dev`` 的共用实现。"""
     run_cmd = list(command) if command else None
@@ -210,13 +211,16 @@ def _submit_impl(
         from .job import build_volcano_job
 
         ns = current_namespace(team)
-        manifest = build_volcano_job(
-            name=name, team=ns, queue=queue, image=image, gpus=gpus,
-            nodes=nodes, command=final_cmd, data=data, shared_data=shared_data,
-            cpu=cpu, memory=memory, ssh=ssh, ssh_password=ssh_password,
-            ssh_pubkey=ssh_pubkey, ssh_port=ssh_port, ports=port, node=node,
-            workspace_path=mount_path, shell=shell, kind=kind,
-        )
+        try:
+            manifest = build_volcano_job(
+                name=name, team=ns, queue=queue, image=image, gpus=gpus,
+                nodes=nodes, command=final_cmd, data=data, shared_data=shared_data,
+                cpu=cpu, memory=memory, ssh=ssh, ssh_password=ssh_password,
+                ssh_pubkey=ssh_pubkey, ssh_port=ssh_port, ports=port, node=node,
+                workspace_path=mount_path, shell=shell, kind=kind, mounts=mounts,
+            )
+        except ValueError as exc:
+            _die(WujiError(str(exc)))
         _echo(yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True))
         return
 
@@ -226,7 +230,7 @@ def _submit_impl(
             gpus=gpus, nodes=nodes, data=data, shared_data=shared_data,
             cpu=cpu, memory=memory, ssh=ssh, ssh_password=ssh_password,
             ssh_pubkey=ssh_pubkey, ssh_port=ssh_port, ports=port, node=node,
-            workspace_path=mount_path, shell=shell, kind=kind,
+            workspace_path=mount_path, shell=shell, kind=kind, mounts=mounts,
             expose_ssh=expose_ssh, ssh_node_port=ssh_node_port,
         )
     except (WujiError, Exception) as exc:  # noqa: BLE001 - friendly exit
@@ -364,6 +368,10 @@ def train(
         None, "--port", help="额外暴露的容器端口(可多次)。"
     ),
     node: Optional[str] = typer.Option(None, "--node", help="钉到指定节点调度。"),
+    mount: Optional[List[str]] = typer.Option(
+        None, "--mount",
+        help="额外挂载 PVC:<pvc>:<容器路径>[:ro],可多次(挂 public/oss 等团队卷)。",
+    ),
     mount_path: str = typer.Option(
         "/workspace", "--mount-path", help="团队 NAS 在容器里的挂载目录。"
     ),
@@ -378,6 +386,7 @@ def train(
         memory=memory, ssh=ssh, ssh_password=ssh_password, ssh_pubkey=ssh_pubkey,
         ssh_port=ssh_port, expose_ssh=expose_ssh, ssh_node_port=ssh_node_port,
         port=port, node=node, mount_path=mount_path, shell=shell, dry_run=dry_run,
+        mounts=mount,
         kind="train",
     )
 
@@ -415,6 +424,10 @@ def dev(
     ),
     port: Optional[List[int]] = typer.Option(None, "--port", help="额外暴露的容器端口(可多次)。"),
     node: Optional[str] = typer.Option(None, "--node", help="钉到指定节点调度。"),
+    mount: Optional[List[str]] = typer.Option(
+        None, "--mount",
+        help="额外挂载 PVC:<pvc>:<容器路径>[:ro],可多次(挂 public/oss 等团队卷)。",
+    ),
     mount_path: str = typer.Option("/workspace", "--mount-path", help="NAS 挂载目录。"),
     shell: str = typer.Option("bash", "--shell", help="包裹命令的 shell(busybox/alpine 用 sh)。"),
     cmd: Optional[str] = typer.Option(None, "--cmd", help="启动命令整段字符串。"),
@@ -429,6 +442,7 @@ def dev(
         memory=memory, ssh=ssh, ssh_password=ssh_password, ssh_pubkey=ssh_pubkey,
         ssh_port=ssh_port, expose_ssh=expose_ssh, ssh_node_port=ssh_node_port,
         port=port, node=node, mount_path=mount_path, shell=shell, dry_run=dry_run,
+        mounts=mount,
         kind="dev",
     )
 
@@ -857,6 +871,31 @@ def _queue_row(q: dict) -> List[str]:
         f"{a['cpu_m'] / 1000:.0f}",
         f"{a['mem_gi']:.0f}",
     ]
+
+
+@app.command("volumes")
+@app.command("vols", hidden=True)
+def volumes(
+    team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
+) -> None:
+    """列出本团队可挂载的 PVC(用 `--mount <pvc>:<路径>` 挂进容器)。"""
+    try:
+        pvcs = sdk.list_pvcs(team=team)
+    except Exception as exc:  # noqa: BLE001
+        _die(exc)
+    rows = [
+        [p["name"], p["status"], p["capacity"], p["storageclass"], p["volume"]]
+        for p in pvcs
+    ]
+    _print_table(
+        f"可挂载 PVC @ {current_namespace(team)}",
+        ["NAME", "STATUS", "容量", "STORAGECLASS", "PV"],
+        rows,
+    )
+    _echo(
+        "挂载:volcano dev/train --mount <NAME>:/容器路径[:ro]  "
+        "(默认已挂 <team>-nas → /workspace,无需手动挂)"
+    )
 
 
 @app.command()

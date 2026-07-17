@@ -65,6 +65,7 @@ def submit(
     ports: Optional[List[int]] = None,
     node: Optional[str] = None,
     kind: Optional[str] = None,
+    mounts: Optional[List[str]] = None,
     expose_ssh: bool = False,
     ssh_node_port: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -119,6 +120,7 @@ def submit(
         ports=ports,
         node=node,
         kind=kind,
+        mounts=mounts,
     )
     _, _, custom = load_clients()
     try:
@@ -907,6 +909,35 @@ def logs(
         )
     except ApiException as exc:
         raise WujiError(humanize_api_exception(exc)) from exc
+
+
+def list_pvcs(*, team: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List PVCs in the team namespace (mountable volumes).
+
+    Returns a list of ``{name, status, capacity, storageclass, volume}`` dicts.
+    """
+    ns = current_namespace(team)
+    core, _, _ = load_clients()
+    try:
+        resp = core.list_namespaced_persistent_volume_claim(namespace=ns)
+    except ApiException as exc:
+        raise WujiError(humanize_api_exception(exc)) from exc
+    out: List[Dict[str, Any]] = []
+    for item in resp.items:
+        st = item.status
+        cap = ""
+        if st and getattr(st, "capacity", None):
+            cap = (st.capacity or {}).get("storage", "")
+        out.append(
+            {
+                "name": item.metadata.name,
+                "status": (st.phase if st else "?") or "?",
+                "capacity": cap or "-",
+                "storageclass": item.spec.storage_class_name or "-",
+                "volume": item.spec.volume_name or "-",
+            }
+        )
+    return out
 
 
 def list_queues() -> List[Dict[str, Any]]:

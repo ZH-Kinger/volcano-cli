@@ -128,6 +128,7 @@ def build_volcano_job(
     ports: Optional[List[int]] = None,
     node: Optional[str] = None,
     kind: Optional[str] = None,
+    mounts: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Build a Volcano ``batch.volcano.sh/v1alpha1`` Job manifest dict.
 
@@ -227,6 +228,31 @@ def build_volcano_job(
                 "name": "datasets",
                 "persistentVolumeClaim": {"claimName": shared_dataset_pvc, "readOnly": True},
             }
+        )
+
+    # --mount <pvc>:<容器路径>[:ro]:把任意 PVC(如 public / oss / 本地 NVMe)挂进容器。
+    # 路径必须绝对且不与内置挂载点冲突;非法项直接报错(ValueError → CLI 友好提示)。
+    _reserved = {workspace_path, DATASETS_MOUNT, DSHM_MOUNT}
+    for i, spec_str in enumerate(mounts or []):
+        parts = spec_str.split(":")
+        if len(parts) < 2 or len(parts) > 3:
+            raise ValueError(f"--mount 格式应为 <pvc>:<容器路径>[:ro]:{spec_str!r}")
+        pvc, mpath = parts[0].strip(), parts[1].strip()
+        read_only = len(parts) == 3 and parts[2].strip().lower() == "ro"
+        if len(parts) == 3 and parts[2].strip().lower() not in ("ro", "rw"):
+            raise ValueError(f"--mount 第三段只能是 ro/rw:{spec_str!r}")
+        if not pvc:
+            raise ValueError(f"--mount 缺少 PVC 名:{spec_str!r}")
+        if not mpath.startswith("/") or mpath == "/":
+            raise ValueError(f"--mount 容器路径须是绝对路径且非根:{mpath!r}")
+        if mpath in _reserved:
+            raise ValueError(f"--mount 路径与内置挂载点冲突(/workspace//datasets//dev/shm):{mpath!r}")
+        vol_name = f"mnt-{i}"
+        container["volumeMounts"].append(
+            {"name": vol_name, "mountPath": mpath, "readOnly": read_only}
+        )
+        volumes.append(
+            {"name": vol_name, "persistentVolumeClaim": {"claimName": pvc, "readOnly": read_only}}
         )
 
     pod_spec: Dict[str, Any] = {
