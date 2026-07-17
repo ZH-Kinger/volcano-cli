@@ -74,6 +74,75 @@ def _die(exc: Exception) -> "typer.Exit":
 
 
 # --------------------------------------------------------------------------- #
+# login — 把用户的 kubeconfig 写到默认位置,之后免设 KUBECONFIG
+# --------------------------------------------------------------------------- #
+@app.command()
+def login(
+    file: Optional[str] = typer.Option(
+        None, "--file", "-f",
+        help="kubeconfig 文件路径;不给则从粘贴内容读(结束:Unix Ctrl-D / Windows Ctrl-Z 回车)。",
+    ),
+    dest: Optional[str] = typer.Option(None, "--dest", help="写入路径,默认 ~/.kube/config。"),
+    force: bool = typer.Option(False, "--force", help="已存在时不备份直接覆盖。"),
+) -> None:
+    """把你的 kubeconfig 写到默认位置(~/.kube/config),之后 volcano/kubectl 免设 KUBECONFIG 直接用。
+
+    用法:`volcano login -f team.kubeconfig`  或  `volcano login`(然后粘贴内容)。
+    """
+    import os
+    import pathlib
+    import shutil
+    from time import localtime, strftime
+
+    import yaml  # 由 kubernetes 依赖带入
+
+    if file:
+        try:
+            content = pathlib.Path(file).read_text(encoding="utf-8")
+        except OSError as exc:
+            _err(f"读不到文件 {file}: {exc}")
+            raise typer.Exit(code=1)
+    else:
+        _echo("粘贴你的 kubeconfig,结束按 Ctrl-D(Windows: Ctrl-Z 然后回车):")
+        content = sys.stdin.read()
+
+    try:
+        doc = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        _err(f"内容不是合法 YAML: {exc}")
+        raise typer.Exit(code=1)
+    if not isinstance(doc, dict) or not all(
+        k in doc for k in ("clusters", "contexts", "users")
+    ):
+        _err("这不像有效的 kubeconfig(缺 clusters/contexts/users)。")
+        raise typer.Exit(code=1)
+
+    target = pathlib.Path(dest) if dest else pathlib.Path.home() / ".kube" / "config"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and not force:
+        bak = target.with_name(target.name + ".bak." + strftime("%Y%m%d-%H%M%S", localtime()))
+        shutil.copy2(target, bak)
+        _echo(f"已备份原 kubeconfig -> {bak}")
+    target.write_text(content, encoding="utf-8")
+    try:
+        os.chmod(target, 0o600)
+    except OSError:
+        pass
+
+    ctx_name = doc.get("current-context", "")
+    ns = ""
+    for c in doc.get("contexts", []) or []:
+        if c.get("name") == ctx_name:
+            ns = (c.get("context", {}) or {}).get("namespace", "")
+            break
+    _echo(f"✅ 已写入 {target}")
+    _echo(f"   context={ctx_name or '(未设)'}  namespace={ns or '(未设)'}")
+    _echo("现在直接 `volcano ls` / `volcano top` 即可,不用再设 KUBECONFIG。")
+    if not ns:
+        _echo("提示:该 kubeconfig 没设默认 namespace;非 admin 记得用 `-t <团队>`。")
+
+
+# --------------------------------------------------------------------------- #
 # submit
 # --------------------------------------------------------------------------- #
 def _submit_impl(
@@ -261,7 +330,7 @@ def train(
     team: Optional[str] = typer.Option(
         None, "--team", "-t", help="团队=namespace(默认取当前 context)。"
     ),
-    queue: str = typer.Option("shared", "--queue", "-q", help="Volcano 队列。"),
+    queue: str = typer.Option("default", "--queue", "-q", help="Volcano 队列(默认 default;限额用 wuji-queue-N)。"),
     image: str = typer.Option(..., "--image", "-i", help="ACR 镜像完整地址。"),
     gpus: int = typer.Option(8, "--gpus", "-g", help="每个 worker 的 GPU 数。"),
     nodes: int = typer.Option(1, "--nodes", help="worker 数(=minAvailable,多机分布式)。"),
@@ -315,7 +384,7 @@ def dev(
     ),
     name: str = typer.Option(..., "--name", "-n", help="开发机名(合法 k8s 名)。"),
     team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
-    queue: str = typer.Option("shared", "--queue", "-q", help="Volcano 队列。"),
+    queue: str = typer.Option("default", "--queue", "-q", help="Volcano 队列(默认 default;限额用 wuji-queue-N)。"),
     image: str = typer.Option(..., "--image", "-i", help="ACR 镜像完整地址。"),
     gpus: int = typer.Option(1, "--gpus", "-g", help="GPU 数(开发机默认 1)。"),
     data: Optional[str] = typer.Option(None, "--data", "-d", help="相对 /workspace 的数据路径。"),
