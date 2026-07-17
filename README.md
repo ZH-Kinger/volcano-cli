@@ -108,6 +108,7 @@ namespace > `default`。
 | `volcano top` | 每个 GPU 节点 GPU/CPU/内存(已用/总)+ 各队列用量 |
 | `volcano usage [-t]` | 某人/团队(namespace)占用的 GPU/CPU/内存 |
 | `volcano queue` | 各 Volcano 队列的 GPU/CPU/内存 配额与用量 |
+| `volcano volumes` | 列本团队可挂载的 PVC(别名 `volcano vols`),配合 `--mount` 用 |
 | `volcano data ls [子路径] [--shared]` | 列 NAS(`/workspace`)或共享数据集(`/datasets`) |
 
 `volcano list -A`(或 `-a`)列出**所有 namespace** 的任务,多一列 NS;admin 和普通用户都能用(只读全局可见)。
@@ -127,6 +128,7 @@ namespace > `default`。
 | `-w` | `--worker` | 第几个 worker(`logs`/`exec`/`ssh`/`forward`/`save`) |
 | `-f` | `--follow` / `--file` | `logs` 跟随 / `login` 读文件 |
 | `-A` `-a` | `--all-namespaces` | `list` 列全部 namespace |
+| （无） | `--mount` | 额外挂载 PVC:`<pvc>:<容器路径>[:ro]`,可多次 |
 
 ## train vs dev
 
@@ -167,6 +169,7 @@ volcano exec mydev             # 进容器
 | `--shared-data` | 相对 `/datasets` 的共享只读数据集路径 | — |
 | `--node` | 钉到指定节点(如 `wuji-3` 大内存机) | — |
 | `--mount-path` | 团队 NAS 在容器里的挂载目录(不能是 `/`) | `/workspace` |
+| `--mount` | 额外挂载 PVC:`<pvc>:<容器路径>[:ro]`,可多次(挂 `public`/`oss` 等团队卷) | — |
 | `--shell` | 包裹命令的 shell(busybox/alpine 用 `sh`) | `bash` |
 | `--cmd` | 整段命令字符串(与 `-- CMD` 二选一) | — |
 | `--port` | 额外暴露的容器端口,可多次 | — |
@@ -197,6 +200,28 @@ volcano exec mydev             # 进容器
 > `--expose-ssh` 的 NodePort **绕过 apiserver 和 RBAC**,进去是 root 且能读写团队 NAS。安全组当前对
 > `0.0.0.0/0` 开放 `30000-32767`;优先用密钥、用完 `volcano kill`。前提:目标节点已打
 > `wuji.io/public-ip` 注解 + 安全组放行 NodePort 段。
+
+## 额外挂载 PVC(`--mount` / `volcano volumes`)
+
+默认已把团队 `<team>-nas` 挂到 `/workspace`,一般够用。要再挂别的团队卷(`public`、`oss-workspace` 等)时用 `--mount`(train/dev 都支持,可多次):
+
+```bash
+volcano volumes                                   # 先看本团队能挂哪些 PVC(别名 vc vols)
+volcano dev -n d1 -i ubuntu:24.04 \
+  --mount public:/public --mount oss-workspace:/oss:ro
+```
+
+- 格式 `<pvc>:<容器路径>[:ro]`,第三段 `ro` 只读、`rw`/省略为读写;PVC 名从 `volcano volumes` 里挑。
+- 容器路径须绝对,且不能撞内置挂载点 `/workspace`、`/datasets`、`/dev/shm`(否则报错)。
+- `volcano volumes`(`vols`)列出本团队 namespace 下所有 PVC:NAME / STATUS / 容量 / STORAGECLASS / PV。
+
+## 存储:数据放哪
+
+统一用 NAS，别把大文件堆在容器根目录:
+
+- `/workspace`(NAS，持久):数据、代码、checkpoint 都放这，跨任务/重启保留、多机共享同一份。默认标准位置。
+- 容器根 `/`：节点本地系统盘，临时且多任务共享；写大文件会写爆系统盘 → DiskPressure 驱逐，连累同节点其他任务。只放临时小文件。
+- 本地 NVMe 快盘:平台默认不建 PVC，一般不用。
 
 ## 保存 / 复用镜像
 

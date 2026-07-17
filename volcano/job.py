@@ -13,6 +13,7 @@ cluster conventions so users never have to hand-write YAML:
 
 from __future__ import annotations
 
+import posixpath
 import shlex
 from typing import Any, Dict, List, Optional, Union
 
@@ -232,7 +233,9 @@ def build_volcano_job(
 
     # --mount <pvc>:<容器路径>[:ro]:把任意 PVC(如 public / oss / 本地 NVMe)挂进容器。
     # 路径必须绝对且不与内置挂载点冲突;非法项直接报错(ValueError → CLI 友好提示)。
-    _reserved = {workspace_path, DATASETS_MOUNT, DSHM_MOUNT}
+    # 保留挂载点也归一化后比对(去尾斜杠/'.'段),防止 /workspace/ 之类绕过检查。
+    _reserved = {posixpath.normpath(p) for p in (workspace_path, DATASETS_MOUNT, DSHM_MOUNT)}
+    _seen_paths: set = set()
     for i, spec_str in enumerate(mounts or []):
         parts = spec_str.split(":")
         if len(parts) < 2 or len(parts) > 3:
@@ -245,11 +248,19 @@ def build_volcano_job(
             raise ValueError(f"--mount 缺少 PVC 名:{spec_str!r}")
         if not mpath.startswith("/") or mpath == "/":
             raise ValueError(f"--mount 容器路径须是绝对路径且非根:{mpath!r}")
-        if mpath in _reserved:
+        if ".." in mpath.split("/"):
+            raise ValueError(f"--mount 容器路径不能含 '..':{mpath!r}")
+        # 归一化后再比对/去重:/workspace/ 、/dev/shm/./ 等都会被规约成保留路径而拒绝,
+        # 两个 --mount 落到同一路径(或与内置点相同)在此提前友好报错,而非 apply 时才被 k8s 拒。
+        norm = posixpath.normpath(mpath)
+        if norm in _reserved:
             raise ValueError(f"--mount 路径与内置挂载点冲突(/workspace//datasets//dev/shm):{mpath!r}")
+        if norm in _seen_paths:
+            raise ValueError(f"--mount 容器路径重复:{norm}")
+        _seen_paths.add(norm)
         vol_name = f"mnt-{i}"
         container["volumeMounts"].append(
-            {"name": vol_name, "mountPath": mpath, "readOnly": read_only}
+            {"name": vol_name, "mountPath": norm, "readOnly": read_only}
         )
         volumes.append(
             {"name": vol_name, "persistentVolumeClaim": {"claimName": pvc, "readOnly": read_only}}
