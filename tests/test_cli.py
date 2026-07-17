@@ -291,7 +291,9 @@ def test_dev_sets_kind_and_defaults(monkeypatch):
     captured = _capture_submit(monkeypatch)
     result = runner.invoke(
         cli.app,
-        ["dev", "--name", "d", "-t", "teamx", "--image", "img"],
+        # --no-expose-ssh: this test only cares about kind/gpu/command defaults,
+        # not the SSH-expose path (which would otherwise poll for a public IP).
+        ["dev", "--name", "d", "-t", "teamx", "--image", "img", "--no-expose-ssh"],
     )
     assert result.exit_code == 0, result.output
     assert captured["kind"] == "dev"
@@ -306,7 +308,8 @@ def test_dev_custom_command_overrides_default(monkeypatch):
     captured = _capture_submit(monkeypatch)
     result = runner.invoke(
         cli.app,
-        ["dev", "--name", "d", "-t", "teamx", "--image", "img", "--", "sleep", "100"],
+        ["dev", "--name", "d", "-t", "teamx", "--image", "img", "--no-expose-ssh",
+         "--", "sleep", "100"],
     )
     assert result.exit_code == 0, result.output
     assert captured["command"] == ["sleep", "100"]
@@ -316,7 +319,8 @@ def test_dev_explicit_gpus(monkeypatch):
     captured = _capture_submit(monkeypatch)
     result = runner.invoke(
         cli.app,
-        ["dev", "--name", "d", "-t", "teamx", "--image", "img", "--gpus", "4"],
+        ["dev", "--name", "d", "-t", "teamx", "--image", "img", "--gpus", "4",
+         "--no-expose-ssh"],
     )
     assert result.exit_code == 0, result.output
     assert captured["gpus"] == 4

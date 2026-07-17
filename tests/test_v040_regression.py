@@ -106,7 +106,8 @@ def test_dev_short_name_and_data(monkeypatch):
     captured = _capture_submit(monkeypatch)
     result = runner.invoke(
         cli.app,
-        ["dev", "-n", "dshort", "-t", "teamx", "-i", "img", "-d", "ckpts"],
+        ["dev", "-n", "dshort", "-t", "teamx", "-i", "img", "-d", "ckpts",
+         "--no-expose-ssh"],
     )
     assert result.exit_code == 0, result.output
     assert captured["name"] == "dshort"
@@ -411,7 +412,9 @@ def test_train_default_queue_is_default(monkeypatch):
 def test_dev_default_queue_is_default(monkeypatch):
     _guard_no_kube(monkeypatch)
     captured = _capture_submit(monkeypatch)
-    result = runner.invoke(cli.app, ["dev", "-n", "d", "-t", "teamx", "-i", "img"])
+    result = runner.invoke(
+        cli.app, ["dev", "-n", "d", "-t", "teamx", "-i", "img", "--no-expose-ssh"]
+    )
     assert result.exit_code == 0, result.output
     assert captured["queue"] == "default"
 

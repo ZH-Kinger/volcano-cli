@@ -507,7 +507,9 @@ def dev(
     ),
     ssh_port: int = typer.Option(22, "--ssh-port", help="容器内 sshd 监听端口。"),
     expose_ssh: bool = typer.Option(
-        False, "--expose-ssh", help="把 SSH 暴露到节点弹性公网 IP(含 --ssh)。"
+        True, "--expose-ssh/--no-expose-ssh",
+        help="默认开:起 sshd 并把 SSH 暴露到节点弹性公网 IP,之后 volcano ssh 直连;"
+             "不需要公网 SSH 用 --no-expose-ssh 关闭。",
     ),
     ssh_node_port: Optional[int] = typer.Option(
         None, "--ssh-nodeport", help="固定 NodePort(30000-32767);默认自动分配。"
@@ -523,7 +525,12 @@ def dev(
     cmd: Optional[str] = typer.Option(None, "--cmd", help="启动命令整段字符串。"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只打印 Job YAML,不真提交。"),
 ) -> None:
-    """起一个开发机(DSW:长驻交互容器,用 volcano exec/ssh 进去开发调试)。"""
+    """起一个开发机(DSW:长驻交互容器,用 volcano exec/ssh 进去开发调试)。
+
+    默认开公网 SSH(--expose-ssh):起 sshd 并暴露到节点弹性公网 IP,提交后可直接
+    ``volcano ssh <名>`` 连进去(未给密码会自动生成一次性 root 密码)。不需要公网
+    SSH 就加 ``--no-expose-ssh``。
+    """
     if not command and not cmd:
         cmd = "tail -f /dev/null"  # 默认长驻,否则容器跑完就退、exec/ssh 进不去
     _submit_impl(
