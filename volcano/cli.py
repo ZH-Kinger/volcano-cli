@@ -149,6 +149,26 @@ def login(
 
 
 # --------------------------------------------------------------------------- #
+# whoami — 我是谁 / 是不是管理员 / 默认投哪个队列
+# --------------------------------------------------------------------------- #
+@app.command()
+def whoami() -> None:
+    """看当前 kubeconfig 的身份:namespace、是否管理员(能否用 register/set)、默认队列。"""
+    try:
+        info = sdk.whoami()
+    except Exception as exc:  # noqa: BLE001
+        _die(exc)
+    ns = info.get("namespace") or "(无默认 namespace)"
+    _echo(f"namespace : {ns}")
+    _echo(f"默认队列  : {info.get('default_queue')}"
+          + (f"  (团队标签 wuji.io/team={info['team']})" if info.get("team") else "  (无团队标签→落 default)"))
+    if info.get("is_admin"):
+        _echo("身份      : ✅ 管理员(可用 volcano register / set / set-queue)")
+    else:
+        _echo("身份      : 普通用户(不能用 register / set / set-queue;只能管自己 ns 的任务)")
+
+
+# --------------------------------------------------------------------------- #
 # register — 【管理员】一键开通团队 + 生成 kubeconfig
 # --------------------------------------------------------------------------- #
 @app.command()
@@ -231,6 +251,94 @@ def register(
 
 
 # --------------------------------------------------------------------------- #
+# set / set-queue — 【管理员】改个人(ns)资源上限 与 团队(queue)额度
+# --------------------------------------------------------------------------- #
+@app.command(name="set")
+def set_cmd(
+    namespace: str = typer.Argument(..., help="要设限的个人 namespace。"),
+    gpu: Optional[int] = typer.Option(None, "--gpu", "-g", help="GPU 上限(张)。"),
+    cpu: Optional[str] = typer.Option(None, "--cpu", "-c", help="CPU 上限(如 64)。"),
+    memory: Optional[str] = typer.Option(None, "--memory", "-m", help="内存上限(如 256Gi)。"),
+    pods: Optional[int] = typer.Option(None, "--pods", help="Pod 数上限。"),
+    team: Optional[str] = typer.Option(
+        None, "--team", help="把此人归属到某团队(写 ns 标签 wuji.io/team,决定默认队列)。"
+    ),
+    clear: bool = typer.Option(False, "--clear", help="删除该人的 ResourceQuota(取消限制)。"),
+) -> None:
+    """【管理员】设/改一个人(namespace)的资源上限(ResourceQuota),也可归属团队。
+
+    不带任何限额参数 = 只查看当前上限与已用。个人上限是 admission 层硬限,任何调度器都生效;
+    团队总量用 `volcano set-queue`。需要管理员 kubeconfig。
+    """
+    try:
+        result = sdk.set_quota(
+            namespace, gpu=gpu, cpu=cpu, memory=memory, pods=pods, team=team, clear=clear,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _die(exc)
+
+    if result.get("team"):
+        _echo(f"已归属团队: {namespace} → wuji.io/team={result['team']}(默认队列将投它)")
+    if result.get("cleared"):
+        _echo(f"✅ 已取消 {namespace} 的资源限制(删除 ResourceQuota)。")
+        return
+    q = result.get("quota")
+    if not q or not q.get("hard"):
+        _echo(f"{namespace} 当前无资源限制(没有 ResourceQuota)。")
+        _echo("设限示例: volcano set " + namespace + " --gpu 8")
+        return
+    hard, used = q["hard"], q.get("used", {})
+    rows = [[k, used.get(k, "0"), v] for k, v in sorted(hard.items())]
+    _print_table(f"{namespace} 资源上限(ResourceQuota gpu-quota)", ["资源", "已用", "上限"], rows)
+
+
+@app.command(name="set-queue")
+def set_queue_cmd(
+    team: str = typer.Argument(..., help="团队队列名(= 团队)。"),
+    deserved: Optional[int] = typer.Option(
+        None, "--deserved", "-d", help="保底/公平份额 GPU 数。"
+    ),
+    cap: Optional[int] = typer.Option(
+        None, "--cap", "-c", help="突发上限 GPU 数(capability)。"
+    ),
+    reclaimable: Optional[bool] = typer.Option(
+        None, "--reclaimable/--no-reclaimable", help="是否允许闲借忙收(默认建队时为开)。"
+    ),
+    delete: bool = typer.Option(False, "--delete", help="删除该队列(default 删不掉)。"),
+) -> None:
+    """【管理员】创建/修改(或删除)一个团队的 Volcano 队列额度。
+
+    不带任何参数 = 只查看该队列现状。团队总量(队列下所有人加起来)受此约束;个人上限用
+    `volcano set`。改完 vc-scheduler 自动重载,不影响在跑任务。需要管理员 kubeconfig。
+    """
+    try:
+        result = sdk.set_queue(
+            team, deserved=deserved, cap=cap, reclaimable=reclaimable, delete=delete,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _die(exc)
+
+    if result.get("deleted"):
+        _echo(f"✅ 已删除队列: {team}")
+        return
+    q = result.get("queue")
+    if "created" not in result:
+        # 查看模式(没给任何改动参数):只报现状,不谎报"已更新"
+        if q:
+            _echo(f"队列 {team}: deserved={q['deserved']} / cap={q['capability']} "
+                  f"/ reclaimable={q['reclaimable']} / state={q['state']}")
+        else:
+            _echo(f"队列 {team} 不存在(用 --deserved/--cap 创建)。")
+        return
+    verb = "已创建" if result.get("created") else "已更新"
+    if q:
+        _echo(f"✅ {verb}队列 {team}: deserved={q['deserved']} / cap={q['capability']} "
+              f"/ reclaimable={q['reclaimable']} / state={q['state']}")
+    else:
+        _echo(f"✅ {verb}队列 {team}。")
+
+
+# --------------------------------------------------------------------------- #
 # submit
 # --------------------------------------------------------------------------- #
 def _submit_impl(
@@ -239,7 +347,7 @@ def _submit_impl(
     cmd: Optional[str],
     name: str,
     team: Optional[str],
-    queue: str,
+    queue: Optional[str],
     image: str,
     gpus: int,
     nodes: int,
@@ -273,6 +381,10 @@ def _submit_impl(
     if mount_path == "/" or not mount_path.startswith("/"):
         _err("--mount-path 必须是绝对路径,且不能是 /(会覆盖容器根)。")
         raise typer.Exit(code=1)
+    # 未显式 --queue 时,默认投到本人所属团队的队列(读 ns 的 wuji.io/team 标签);
+    # 没标签/读不到则回退 default。让 ns=人、queue=团队 的模型对用户透明。
+    if queue is None:
+        queue = sdk.resolve_default_queue(team)
     if ssh_node_port is not None and not (30000 <= ssh_node_port <= 32767):
         _err("--ssh-nodeport 必须在 30000-32767 之间(Kubernetes NodePort 段)。")
         raise typer.Exit(code=1)
@@ -430,7 +542,7 @@ def train(
     team: Optional[str] = typer.Option(
         None, "--team", "-t", help="团队=namespace(默认取当前 context)。"
     ),
-    queue: str = typer.Option("default", "--queue", "-q", help="Volcano 队列(默认 default;限额用 wuji-queue-N)。"),
+    queue: Optional[str] = typer.Option(None, "--queue", "-q", help="Volcano 队列;默认投你所属团队队列(ns 的 wuji.io/team 标签),无则 default。"),
     image: str = typer.Option(..., "--image", "-i", help="ACR 镜像完整地址。"),
     gpus: int = typer.Option(8, "--gpus", "-g", help="每个 worker 的 GPU 数。"),
     nodes: int = typer.Option(1, "--nodes", help="worker 数(=minAvailable,多机分布式)。"),
@@ -489,7 +601,7 @@ def dev(
     ),
     name: str = typer.Option(..., "--name", "-n", help="开发机名(合法 k8s 名)。"),
     team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
-    queue: str = typer.Option("default", "--queue", "-q", help="Volcano 队列(默认 default;限额用 wuji-queue-N)。"),
+    queue: Optional[str] = typer.Option(None, "--queue", "-q", help="Volcano 队列;默认投你所属团队队列(ns 的 wuji.io/team 标签),无则 default。"),
     image: str = typer.Option(..., "--image", "-i", help="ACR 镜像完整地址。"),
     gpus: int = typer.Option(1, "--gpus", "-g", help="GPU 数(开发机默认 1)。"),
     data: Optional[str] = typer.Option(None, "--data", "-d", help="相对 /workspace 的数据路径。"),

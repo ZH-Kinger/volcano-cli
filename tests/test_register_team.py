@@ -110,6 +110,9 @@ class FakeRbac:
     def create_cluster_role(self, *a, **k):
         self._rec("create_cluster_role", *a, **k)
 
+    def patch_cluster_role(self, *a, **k):
+        self._rec("patch_cluster_role", *a, **k)
+
     def create_cluster_role_binding(self, *a, **k):
         self._rec("create_cluster_role_binding", *a, **k)
 
@@ -420,6 +423,51 @@ def test_existing_objects_not_reported_created(monkeypatch):
     out = sdk.register_team("teamx")
     assert out["created"] == []
     assert out["kubeconfig"]  # still assembled from the (pre-existing) token secret
+
+
+# --------------------------------------------------------------------------- #
+# shared ClusterRole is RECONCILED (create, else patch on 409) so new rules
+# (e.g. namespaces read for default-queue routing) reach a pre-existing role.
+# --------------------------------------------------------------------------- #
+def test_cluster_role_fresh_creates_no_patch(monkeypatch):
+    core, rbac, auth = FakeCore(), FakeRbac(), FakeAuth()
+    _wire(monkeypatch, core, rbac, auth)
+    sdk.register_team("teamx")
+    names = [c[0] for c in rbac.calls]
+    assert "create_cluster_role" in names
+    assert "patch_cluster_role" not in names  # fresh create -> no patch
+
+
+def test_cluster_role_existing_patches_rules(monkeypatch):
+    core, rbac, auth = FakeCore(), FakeRbac(), FakeAuth()
+
+    def conflict(*a, **k):
+        raise ApiException(status=409)
+
+    rbac.create_cluster_role = conflict  # already exists
+    _wire(monkeypatch, core, rbac, auth)
+    sdk.register_team("teamx")
+    patches = [c for c in rbac.calls if c[0] == "patch_cluster_role"]
+    assert len(patches) == 1  # reconciled exactly once
+    _, _a, kw = patches[0]
+    assert kw["name"] == "volcano-cluster-viewer"
+    assert kw["body"] == {"rules": sdk._CLUSTER_VIEWER_RULES}
+
+
+def test_cluster_role_patch_error_raises_wuji(monkeypatch):
+    core, rbac, auth = FakeCore(), FakeRbac(), FakeAuth()
+
+    def conflict(*a, **k):
+        raise ApiException(status=409)
+
+    def patch_boom(*a, **k):
+        raise ApiException(status=500)
+
+    rbac.create_cluster_role = conflict
+    rbac.patch_cluster_role = patch_boom
+    _wire(monkeypatch, core, rbac, auth)
+    with pytest.raises(WujiError):
+        sdk.register_team("teamx")
 
 
 # =========================================================================== #

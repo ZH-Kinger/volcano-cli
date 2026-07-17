@@ -29,6 +29,7 @@ from .kube import (
     NAS_SERVER,
     NODE_PUBLIC_IP_ANNOTATION,
     SAVE_REQUEST_LABEL,
+    TEAM_LABEL,
     VOLCANO_JOB_GROUP,
     VOLCANO_JOB_PLURAL,
     VOLCANO_JOB_VERSION,
@@ -1201,7 +1202,9 @@ _TEAM_ROLE_RULES = [
 # 共享只读集群视图(volcano top/usage/queue、ls -A、--expose-ssh 公网 IP 解析)。
 _CLUSTER_VIEWER_NAME = "volcano-cluster-viewer"
 _CLUSTER_VIEWER_RULES = [
-    {"apiGroups": [""], "resources": ["nodes", "pods"], "verbs": ["get", "list", "watch"]},
+    # namespaces get/list/watch: read-only, lets a user read their own ns's
+    # wuji.io/team label so submit can default --queue to their team queue.
+    {"apiGroups": [""], "resources": ["nodes", "pods", "namespaces"], "verbs": ["get", "list", "watch"]},
     {
         "apiGroups": ["scheduling.volcano.sh"],
         "resources": ["queues", "podgroups"],
@@ -1227,18 +1230,17 @@ def _ignore_conflict(fn, *args, **kwargs) -> bool:
         raise WujiError(humanize_api_exception(exc)) from exc
 
 
-def _require_admin() -> None:
-    """Gate: caller must be able to create namespaces AND clusterrolebindings.
+def check_admin() -> bool:
+    """Return True if the caller can create namespaces AND clusterrolebindings.
 
-    Uses SelfSubjectAccessReview so we fail fast with a clear message instead of
-    getting a partial half-created team when a non-admin runs ``volcano register``.
+    This is the proxy for "is an admin kubeconfig" used to gate ``register`` /
+    ``set`` / ``set-queue``. Non-raising: any denial or API error → False.
     """
     auth = client.AuthorizationV1Api()
-    checks = [
+    for group, resource, verb in (
         ("", "namespaces", "create"),
         ("rbac.authorization.k8s.io", "clusterrolebindings", "create"),
-    ]
-    for group, resource, verb in checks:
+    ):
         review = client.V1SelfSubjectAccessReview(
             spec=client.V1SelfSubjectAccessReviewSpec(
                 resource_attributes=client.V1ResourceAttributes(
@@ -1248,13 +1250,55 @@ def _require_admin() -> None:
         )
         try:
             resp = auth.create_self_subject_access_review(review)
-        except ApiException as exc:
-            raise WujiError(humanize_api_exception(exc)) from exc
+        except ApiException:
+            return False
         if not (resp.status and resp.status.allowed):
-            raise WujiError(
-                f"volcano register 需要管理员 kubeconfig(能创建 {resource})。"
-                "当前身份权限不足——请用集群管理员的 kubeconfig。"
-            )
+            return False
+    return True
+
+
+def _require_admin() -> None:
+    """Gate: raise unless the caller is an admin (see :func:`check_admin`).
+
+    Fail fast with a clear message instead of leaving a half-created team when a
+    non-admin runs an admin-only command.
+    """
+    if not check_admin():
+        raise WujiError(
+            "该命令需要管理员 kubeconfig(能创建 namespace / clusterrolebinding)。"
+            "当前身份权限不足——请用集群管理员的 kubeconfig。"
+        )
+
+
+def whoami() -> Dict[str, Any]:
+    """Report the caller's identity, admin status, namespace and default queue.
+
+    Returns ``{namespace, is_admin, default_queue, team}`` — all best-effort
+    (fields fall back to None/"?" if they can't be resolved).
+    """
+    load_clients()
+    try:
+        admin = check_admin()
+    except Exception:  # noqa: BLE001
+        admin = False
+    try:
+        ns = current_namespace(None)
+    except Exception:  # noqa: BLE001 - admin kubeconfig may have no default ns
+        ns = None
+    team = None
+    if ns:
+        try:
+            core, _, _ = load_clients()
+            obj = core.read_namespace(name=ns)
+            team = ((obj.metadata.labels or {}) if obj.metadata else {}).get(TEAM_LABEL)
+        except Exception:  # noqa: BLE001
+            team = None
+    return {
+        "namespace": ns,
+        "is_admin": admin,
+        "team": team,
+        "default_queue": team or "default",
+    }
 
 
 def _nas_mkdir(core, team: str, nas_server: str, nas_base: str, timeout: int = 90) -> None:
@@ -1442,10 +1486,21 @@ def register_team(
         created.append(f"rolebinding/{team}-volcano")
 
     # 4) shared read-only ClusterRole + per-team binding
-    _ignore_conflict(
-        rbac.create_cluster_role,
-        {"metadata": {"name": _CLUSTER_VIEWER_NAME}, "rules": _CLUSTER_VIEWER_RULES},
-    )
+    # reconcile(非仅 create):已存在则 patch rules——否则新增的权限(如 namespaces 只读,
+    # 供默认队列路由读 ns 的 team 标签)永远不会应用到既有 ClusterRole,默认路由静默失效。
+    cr_body = {"metadata": {"name": _CLUSTER_VIEWER_NAME}, "rules": _CLUSTER_VIEWER_RULES}
+    try:
+        rbac.create_cluster_role(cr_body)
+    except ApiException as exc:
+        if exc.status == 409:
+            try:
+                rbac.patch_cluster_role(
+                    name=_CLUSTER_VIEWER_NAME, body={"rules": _CLUSTER_VIEWER_RULES}
+                )
+            except ApiException as exc2:
+                raise WujiError(humanize_api_exception(exc2)) from exc2
+        else:
+            raise WujiError(humanize_api_exception(exc)) from exc
     crb_body = {
         "metadata": {"name": f"{team}-volcano-viewer"},
         "roleRef": {
@@ -1510,3 +1565,250 @@ def register_team(
         "nas_pvc": f"{team}-nas",
         "created": created,
     }
+
+
+# --------------------------------------------------------------------------- #
+# two-layer resource limits: per-person ResourceQuota + per-team Volcano Queue
+# --------------------------------------------------------------------------- #
+# 模型:ns=一个人、queue=一个团队。个人卡上限 = 该 ns 的 ResourceQuota(admission 硬拦,
+# 任何调度器都生效);团队总量 = Volcano Queue 的 deserved/capability(调度层,按队列记账)。
+# `volcano set` 管前者,`volcano set-queue` 管后者;submit 默认把任务投到本人所属团队队列
+# (读 ns 的 wuji.io/team 标签)。
+
+_QUOTA_NAME = "gpu-quota"
+
+
+def resolve_default_queue(team: Optional[str] = None) -> str:
+    """Resolve the queue a submission should default to = the person's team.
+
+    Reads the ``wuji.io/team`` label on the current namespace. Falls back to
+    ``"default"`` if the label is absent or the namespace can't be read (e.g. a
+    user without namespace read — routing then just uses the shared pool).
+    """
+    try:
+        ns = current_namespace(team)
+        core, _, _ = load_clients()
+        obj = core.read_namespace(name=ns)
+        labels = (obj.metadata.labels or {}) if obj.metadata else {}
+        return labels.get(TEAM_LABEL) or "default"
+    except Exception:  # noqa: BLE001 - never block submit on queue resolution
+        return "default"
+
+
+def _quota_hard(gpu, cpu, memory, pods) -> Dict[str, str]:
+    """Assemble a ResourceQuota ``hard`` map from the given per-person limits."""
+    hard: Dict[str, str] = {}
+    if gpu is not None:
+        hard["requests.nvidia.com/gpu"] = str(gpu)
+        hard["limits.nvidia.com/gpu"] = str(gpu)
+    if cpu is not None:
+        hard["requests.cpu"] = str(cpu)
+    if memory is not None:
+        hard["requests.memory"] = str(memory)
+    if pods is not None:
+        hard["pods"] = str(pods)
+    return hard
+
+
+def get_quota(namespace: str) -> Optional[Dict[str, Any]]:
+    """Read a person's ResourceQuota (name ``gpu-quota``). None if unset.
+
+    Returns ``{namespace, hard: {...}, used: {...}}`` (hard/used are quantity
+    strings) or None when the namespace has no ``gpu-quota``.
+    """
+    core, _, _ = load_clients()
+    try:
+        rq = core.read_namespaced_resource_quota(name=_QUOTA_NAME, namespace=namespace)
+    except ApiException as exc:
+        if exc.status == 404:
+            return None
+        raise WujiError(humanize_api_exception(exc)) from exc
+    # 上限读 spec.hard(声明即在,刚 create/patch 后立即可见);已用读 status.used
+    # (由 quota 控制器 reconcile 后才有,读不到就当 0)。
+    spec = rq.spec
+    status = rq.status
+    return {
+        "namespace": namespace,
+        "hard": dict((spec.hard or {}) if spec else {}),
+        "used": dict((status.used or {}) if status else {}),
+    }
+
+
+def set_quota(
+    namespace: str,
+    *,
+    gpu: Optional[int] = None,
+    cpu: Optional[str] = None,
+    memory: Optional[str] = None,
+    pods: Optional[int] = None,
+    team: Optional[str] = None,
+    clear: bool = False,
+) -> Dict[str, Any]:
+    """Admin-only: set/patch a person's per-namespace resource limits.
+
+    Upserts a ResourceQuota named ``gpu-quota`` in ``namespace`` with the given
+    hard limits (only the dimensions you pass are touched — partial updates merge).
+    ``team`` also writes the ``wuji.io/team`` namespace label (person→team). With
+    ``clear`` the ResourceQuota is deleted (no limit). With no limit flags it just
+    reports the current quota (and applies ``team`` if given).
+
+    Raises:
+        WujiError: if the caller isn't an admin, or on any API failure.
+    """
+    load_clients()
+    _require_admin()
+    core = client.CoreV1Api()
+
+    label_set = None
+    if team is not None:
+        try:
+            core.patch_namespace(
+                name=namespace, body={"metadata": {"labels": {TEAM_LABEL: team}}}
+            )
+            label_set = team
+        except ApiException as exc:
+            raise WujiError(humanize_api_exception(exc)) from exc
+
+    if clear:
+        try:
+            core.delete_namespaced_resource_quota(name=_QUOTA_NAME, namespace=namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise WujiError(humanize_api_exception(exc)) from exc
+        return {"namespace": namespace, "cleared": True, "team": label_set, "quota": None}
+
+    hard = _quota_hard(gpu, cpu, memory, pods)
+    if not hard:
+        # nothing to limit — just report current (and note any team label change)
+        return {"namespace": namespace, "team": label_set, "quota": get_quota(namespace)}
+
+    body = {
+        "metadata": {"name": _QUOTA_NAME, "namespace": namespace},
+        "spec": {"hard": hard},
+    }
+    try:
+        core.create_namespaced_resource_quota(namespace=namespace, body=body)
+    except ApiException as exc:
+        if exc.status == 409:
+            try:
+                core.patch_namespaced_resource_quota(
+                    name=_QUOTA_NAME, namespace=namespace, body={"spec": {"hard": hard}}
+                )
+            except ApiException as exc2:
+                raise WujiError(humanize_api_exception(exc2)) from exc2
+        else:
+            raise WujiError(humanize_api_exception(exc)) from exc
+    return {"namespace": namespace, "team": label_set, "quota": get_quota(namespace)}
+
+
+def get_queue_one(name: str) -> Optional[Dict[str, Any]]:
+    """Read a single Volcano Queue's deserved/capability/reclaimable/state. None if absent."""
+    _, _, custom = load_clients()
+    try:
+        obj = custom.get_cluster_custom_object(
+            group=VOLCANO_QUEUE_GROUP,
+            version=VOLCANO_QUEUE_VERSION,
+            plural=VOLCANO_QUEUE_PLURAL,
+            name=name,
+        )
+    except ApiException as exc:
+        if exc.status == 404:
+            return None
+        raise WujiError(humanize_api_exception(exc)) from exc
+    spec = obj.get("spec", {}) or {}
+    st = obj.get("status", {}) or {}
+    return {
+        "name": name,
+        "deserved": (spec.get("deserved") or {}).get("nvidia.com/gpu", "-"),
+        "capability": (spec.get("capability") or {}).get("nvidia.com/gpu", "-"),
+        "reclaimable": spec.get("reclaimable"),
+        "state": st.get("state", "-"),
+    }
+
+
+def set_queue(
+    name: str,
+    *,
+    deserved: Optional[int] = None,
+    cap: Optional[int] = None,
+    reclaimable: Optional[bool] = None,
+    delete: bool = False,
+) -> Dict[str, Any]:
+    """Admin-only: create/update (or delete) a team's Volcano Queue.
+
+    Upserts the cluster-scoped Queue ``name`` (= team), setting only the fields you
+    pass (``deserved``/``cap`` are the ``nvidia.com/gpu`` quantities; ``reclaimable``
+    toggles idle-borrow/reclaim). New queues default to ``reclaimable: true``. With
+    ``delete`` the queue is removed (Volcano forbids deleting ``default``).
+
+    Raises:
+        WujiError: if the caller isn't an admin, or on any API failure.
+    """
+    load_clients()
+    # 无任何改动参数 = 只查看,不写、也不需要 admin(避免拼错队列名把空队列建出来)。
+    if not delete and deserved is None and cap is None and reclaimable is None:
+        return {"name": name, "queue": get_queue_one(name)}
+    _require_admin()
+    _, _, custom = load_clients()
+
+    if delete:
+        try:
+            custom.delete_cluster_custom_object(
+                group=VOLCANO_QUEUE_GROUP,
+                version=VOLCANO_QUEUE_VERSION,
+                plural=VOLCANO_QUEUE_PLURAL,
+                name=name,
+            )
+        except ApiException as exc:
+            raise WujiError(humanize_api_exception(exc)) from exc
+        return {"name": name, "deleted": True}
+
+    try:
+        existing = custom.get_cluster_custom_object(
+            group=VOLCANO_QUEUE_GROUP,
+            version=VOLCANO_QUEUE_VERSION,
+            plural=VOLCANO_QUEUE_PLURAL,
+            name=name,
+        )
+    except ApiException as exc:
+        if exc.status == 404:
+            existing = None
+        else:
+            raise WujiError(humanize_api_exception(exc)) from exc
+
+    spec = dict(existing.get("spec", {})) if existing else {"reclaimable": True}
+    if deserved is not None:
+        spec["deserved"] = {**(spec.get("deserved") or {}), "nvidia.com/gpu": str(deserved)}
+    if cap is not None:
+        spec["capability"] = {**(spec.get("capability") or {}), "nvidia.com/gpu": str(cap)}
+    if reclaimable is not None:
+        spec["reclaimable"] = reclaimable
+
+    body = {
+        "apiVersion": f"{VOLCANO_QUEUE_GROUP}/{VOLCANO_QUEUE_VERSION}",
+        "kind": "Queue",
+        "metadata": {"name": name},
+        "spec": spec,
+    }
+    try:
+        if existing:
+            body["metadata"]["resourceVersion"] = (
+                existing.get("metadata", {}).get("resourceVersion")
+            )
+            custom.replace_cluster_custom_object(
+                group=VOLCANO_QUEUE_GROUP,
+                version=VOLCANO_QUEUE_VERSION,
+                plural=VOLCANO_QUEUE_PLURAL,
+                name=name,
+                body=body,
+            )
+        else:
+            custom.create_cluster_custom_object(
+                group=VOLCANO_QUEUE_GROUP,
+                version=VOLCANO_QUEUE_VERSION,
+                plural=VOLCANO_QUEUE_PLURAL,
+                body=body,
+            )
+    except ApiException as exc:
+        raise WujiError(humanize_api_exception(exc)) from exc
+    return {"name": name, "created": existing is None, "queue": get_queue_one(name)}

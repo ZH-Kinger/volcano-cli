@@ -32,6 +32,11 @@ VOLCANO_QUEUE_PLURAL = "queues"
 # Pods created by a Volcano Job carry this label = the job name.
 JOB_NAME_LABEL = "volcano.sh/job-name"
 
+# Namespace label recording which team (= Volcano queue) a person's ns belongs to.
+# `volcano set <ns> --team <t>` writes it; submit reads it to default --queue to the
+# person's team queue (so ns=person, queue=team). Falls back to "default" if absent.
+TEAM_LABEL = "wuji.io/team"
+
 # Admin annotates each edge node with its elastic public IP so wuji can print a
 # reachable ``ssh root@<ip> -p <nodeport>`` line for --expose-ssh jobs.
 NODE_PUBLIC_IP_ANNOTATION = "wuji.io/public-ip"
