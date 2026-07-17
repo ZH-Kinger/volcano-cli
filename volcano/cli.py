@@ -286,6 +286,10 @@ def _submit_impl(
                     f"volcano ssh {name} --worker {i}{team_arg}"
                 )
         _echo(f"  或走隧道: volcano ssh {name} --worker <i>{team_arg}")
+        _echo(
+            "  提示:地址已就绪但容器可能还在启动;首次连接被拒属正常,"
+            "volcano ssh 会自动等就绪再连,或等 30–60 秒后手动重试。"
+        )
     elif expose_ssh:
         node_port = result.get("_ssh_node_port") if isinstance(result, dict) else None
         _echo("")
@@ -312,10 +316,14 @@ def _submit_impl(
             )
             _echo(f"  稍后跑: volcano ssh {name}{team_arg}  # 会自动走公网直连")
         _echo(f"  或仍走隧道: volcano ssh {name}{team_arg}{port_arg}")
+        _echo(
+            "  提示:地址已就绪但容器可能还在启动;首次连接被拒属正常,"
+            "volcano ssh 会自动等就绪再连,或等 30–60 秒后手动重试。"
+        )
     elif enable_ssh:
         _echo("")
         _echo("SSH 就绪(root,密码即 --ssh-password;需容器 Running 后稍等 sshd 起来):")
-        _echo(f"  一步连:   volcano ssh {name}{team_arg}{port_arg}")
+        _echo(f"  一步连:   volcano ssh {name}{team_arg}{port_arg}  # 会自动等容器就绪再连")
         _echo(
             f"  或用 IP:  volcano forward {name} {ssh_port} --local-port 2222{team_arg}  "
             f"# 挂着别关,另开终端: ssh -p 2222 root@127.0.0.1"
@@ -724,6 +732,52 @@ def exec_cmd(
 # --------------------------------------------------------------------------- #
 # ssh / forward — 端口转发 & SSH
 # --------------------------------------------------------------------------- #
+def _wait_pod_running(
+    name: str,
+    *,
+    team: Optional[str],
+    pod: Optional[str] = None,
+    worker: Optional[int] = None,
+    timeout: int = 120,
+) -> None:
+    """轮询等目标 Pod 到 Running,再返回;超时/取不到状态就放行(不挡着连接)。
+
+    解决"``--expose-ssh`` 地址在提交时就建好并打印,但 pod 还在调度/拉镜像/起 sshd,
+    用户去连被拒"的坑:连接前先等容器就绪,并打印进度提示,省得手动重试。
+    Ctrl+C 可随时中断等待、直接尝试连接。
+    """
+    target = pod or (f"{name}-worker-{worker}" if worker is not None else None)
+    waited = 0
+    announced = False
+    # 整个轮询体包一层 KeyboardInterrupt:Ctrl+C 无论落在 sleep 还是 sdk.status 的
+    # 网络调用期间,都干净地"中断等待、直接去连",而不是抛裸 traceback。
+    try:
+        while waited < timeout:
+            try:
+                info = sdk.status(name, team=team)
+            except Exception:  # noqa: BLE001 - 状态拿不到就别挡着,直接放行去连
+                return
+            pods = info.get("pods", [])
+            match = [p for p in pods if p["name"] == target] if target else pods
+            if any(p["phase"] == "Running" for p in match):
+                if announced:
+                    _echo("  ✅ 容器已 Running(sshd 可能还需几秒起来,若首次被拒稍等重试)。")
+                return
+            if match and not announced:
+                _echo(
+                    f"⏳ 容器还没就绪(当前 {match[0]['phase']}),等待中 …… "
+                    f"最多等 {timeout}s(Ctrl+C 可中断直接连)。"
+                )
+                announced = True
+            time.sleep(3)
+            waited += 3
+    except KeyboardInterrupt:
+        _echo("  (已中断等待,直接尝试连接)")
+        return
+    if announced:
+        _echo(f"  容器 {timeout}s 内仍未 Running;直接尝试连接(可能被拒,请稍后重试)。")
+
+
 def _first_running_pod(
     name: str, team: Optional[str], pod: Optional[str], worker: Optional[int] = None
 ):
@@ -757,11 +811,17 @@ def ssh_cmd(
     ),
     ssh_port: int = typer.Option(22, "--ssh-port", help="容器内 sshd 端口(须与提交时一致)。"),
     local_port: int = typer.Option(2222, "--local-port", help="本地映射端口。"),
+    no_wait: bool = typer.Option(
+        False, "--no-wait", help="不等容器就绪,直接尝试连接(默认会先等 Pod Running)。"
+    ),
 ) -> None:
     """SSH 进任务容器(root)。需提交时开了 --ssh。
 
     边缘节点无公网 IP,故用 ``kubectl port-forward`` 把容器 sshd 端口映射到本地再 ssh。
     需本机装 kubectl + ssh。
+
+    默认会先等目标 Pod 到 Running 再连(容器还在拉镜像/调度时,提交时打印的 SSH 地址
+    连过去会被拒——这里替你等好);急着连或想自己重试用 ``--no-wait``。
     """
     import shutil
     import subprocess
@@ -770,6 +830,10 @@ def ssh_cmd(
     if not shutil.which("ssh"):
         _err("需要本机安装 ssh。")
         raise typer.Exit(code=1)
+
+    # 连接前先等容器就绪(除非 --no-wait):地址提交即建、容器却可能没起,先等再连省得手动重试。
+    if not no_wait:
+        _wait_pod_running(name, team=team, pod=pod, worker=worker)
 
     # 若任务用 --expose-ssh 提交,直接公网连,免 port-forward:
     #   指定 --worker i → 该 worker 的独立公网入口(多机 per-worker NodePort);
