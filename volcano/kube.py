@@ -55,6 +55,15 @@ DEFAULT_ACR_REPO_PREFIX = "wuji-rl"
 IMAGE_INDEX_NAMESPACE = "wuji-public"
 IMAGE_INDEX_NAME = "wuji-images"
 
+# --- team onboarding (volcano register, admin-only) --------------------------
+# Public apiserver endpoint baked into generated team kubeconfigs (edge nodes
+# have no VPC route; teams reach the cluster via this elastic public endpoint).
+DEFAULT_APISERVER = "https://39.104.72.117:6443"
+# Bare-IP NFS NAS (no CSI on ENS). Each team gets a static PV at NAS_BASE/<team>,
+# mounted at /workspace. These are infra coordinates, not secrets.
+NAS_SERVER = "100.64.128.15"
+NAS_BASE = "/1704065796538912/wuji-nas-0/wuji_ws_2/users"
+
 
 class WujiError(RuntimeError):
     """User-facing error: message is safe to print without a traceback."""

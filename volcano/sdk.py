@@ -7,20 +7,26 @@ loads clients, and turns Kubernetes ``ApiException``\\ s into :class:`WujiError`
 
 from __future__ import annotations
 
+import base64
 import json
+import re
 import secrets
 import time
 from typing import Any, Dict, List, Optional, Union
 
+from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 
 from .job import build_volcano_job
 from .kube import (
     DEFAULT_ACR_REGISTRY,
     DEFAULT_ACR_REPO_PREFIX,
+    DEFAULT_APISERVER,
     IMAGE_INDEX_NAME,
     IMAGE_INDEX_NAMESPACE,
     JOB_NAME_LABEL,
+    NAS_BASE,
+    NAS_SERVER,
     NODE_PUBLIC_IP_ANNOTATION,
     SAVE_REQUEST_LABEL,
     VOLCANO_JOB_GROUP,
@@ -1152,3 +1158,355 @@ def _job_gpus(tasks: List[Dict[str, Any]]) -> int:
                 pass
         total += replicas * per_pod
     return total
+
+
+# --------------------------------------------------------------------------- #
+# volcano register — admin-only one-shot team onboarding + kubeconfig
+# --------------------------------------------------------------------------- #
+# 把 platform/add-team.sh + grant-volcano-kubeconfig.sh 的整套开团队逻辑收进 CLI:
+# 建 ns + NAS PV/PVC + SA/Role/RoleBinding + 只读 ClusterRole 绑定 + 长期 token +
+# 生成团队 kubeconfig。**不碰 ACR**——平台 credential-helper 自动把
+# acr-credential-secret-aggregation 注入每个 ns 并绑 default SA,拉镜像天然可用。
+# 需要管理员 kubeconfig(能建 namespace / clusterrolebinding),用 SelfSubjectAccessReview 门禁。
+
+_TEAM_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+
+# 团队 Role 授权面(namespaced);与 grant-volcano-kubeconfig.sh 一致。
+_TEAM_ROLE_RULES = [
+    {
+        "apiGroups": ["batch.volcano.sh"],
+        "resources": ["jobs", "jobs/status"],
+        "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+    },
+    {
+        "apiGroups": ["scheduling.volcano.sh"],
+        "resources": ["podgroups", "queues"],
+        "verbs": ["get", "list", "watch"],
+    },
+    {
+        "apiGroups": [""],
+        "resources": ["resourcequotas"],
+        "verbs": ["get", "list", "watch"],
+    },
+    {
+        "apiGroups": [""],
+        "resources": [
+            "pods", "pods/log", "pods/exec", "pods/portforward",
+            "services", "endpoints", "configmaps", "persistentvolumeclaims", "events",
+        ],
+        "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+    },
+]
+
+# 共享只读集群视图(volcano top/usage/queue、ls -A、--expose-ssh 公网 IP 解析)。
+_CLUSTER_VIEWER_NAME = "volcano-cluster-viewer"
+_CLUSTER_VIEWER_RULES = [
+    {"apiGroups": [""], "resources": ["nodes", "pods"], "verbs": ["get", "list", "watch"]},
+    {
+        "apiGroups": ["scheduling.volcano.sh"],
+        "resources": ["queues", "podgroups"],
+        "verbs": ["get", "list", "watch"],
+    },
+    {"apiGroups": ["batch.volcano.sh"], "resources": ["jobs"], "verbs": ["get", "list", "watch"]},
+]
+
+_NAS_MOUNT_OPTIONS = [
+    "vers=3", "nolock", "proto=tcp", "rsize=1048576", "wsize=1048576",
+    "hard", "timeo=600", "retrans=2", "noresvport",
+]
+
+
+def _ignore_conflict(fn, *args, **kwargs) -> bool:
+    """Call a create-* API fn, swallowing 409 (already exists). Returns created?."""
+    try:
+        fn(*args, **kwargs)
+        return True
+    except ApiException as exc:
+        if exc.status == 409:
+            return False
+        raise WujiError(humanize_api_exception(exc)) from exc
+
+
+def _require_admin() -> None:
+    """Gate: caller must be able to create namespaces AND clusterrolebindings.
+
+    Uses SelfSubjectAccessReview so we fail fast with a clear message instead of
+    getting a partial half-created team when a non-admin runs ``volcano register``.
+    """
+    auth = client.AuthorizationV1Api()
+    checks = [
+        ("", "namespaces", "create"),
+        ("rbac.authorization.k8s.io", "clusterrolebindings", "create"),
+    ]
+    for group, resource, verb in checks:
+        review = client.V1SelfSubjectAccessReview(
+            spec=client.V1SelfSubjectAccessReviewSpec(
+                resource_attributes=client.V1ResourceAttributes(
+                    verb=verb, group=group, resource=resource
+                )
+            )
+        )
+        try:
+            resp = auth.create_self_subject_access_review(review)
+        except ApiException as exc:
+            raise WujiError(humanize_api_exception(exc)) from exc
+        if not (resp.status and resp.status.allowed):
+            raise WujiError(
+                f"volcano register 需要管理员 kubeconfig(能创建 {resource})。"
+                "当前身份权限不足——请用集群管理员的 kubeconfig。"
+            )
+
+
+def _nas_mkdir(core, team: str, nas_server: str, nas_base: str, timeout: int = 90) -> None:
+    """Create the team's NAS sub-directory via a short-lived helper Pod.
+
+    Mirrors add-team.sh step 2, but uses the pre-warmed ``ubuntu:24.04`` image
+    (the old busybox ref was a Hangzhou VPC image edge nodes can't pull).
+    Best-effort: NFS root must allow the mkdir; failures surface as WujiError.
+    """
+    pod_name = f"volcano-mkdir-{team}"
+    try:
+        core.delete_namespaced_pod(name=pod_name, namespace=team)
+    except ApiException:
+        pass
+    body = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": pod_name,
+            "labels": {"app.kubernetes.io/managed-by": "wuji"},
+        },
+        "spec": {
+            "restartPolicy": "Never",
+            "containers": [
+                {
+                    "name": "mkdir",
+                    "image": "ubuntu:24.04",
+                    "command": [
+                        "sh", "-c",
+                        f"mkdir -p /nas/{team} && chmod 0777 /nas/{team} && echo MKDIR-OK",
+                    ],
+                    "volumeMounts": [{"name": "nas", "mountPath": "/nas"}],
+                }
+            ],
+            "volumes": [{"name": "nas", "nfs": {"server": nas_server, "path": nas_base}}],
+        },
+    }
+    try:
+        core.create_namespaced_pod(namespace=team, body=body)
+    except ApiException as exc:
+        raise WujiError(
+            f"建 NAS 目录的 helper Pod 创建失败:{humanize_api_exception(exc)}"
+        ) from exc
+    deadline = time.time() + timeout
+    phase = "Pending"
+    while time.time() < deadline:
+        try:
+            pod = core.read_namespaced_pod(name=pod_name, namespace=team)
+            phase = (pod.status.phase if pod.status else "Pending") or "Pending"
+        except ApiException:
+            phase = "Pending"
+        if phase in ("Succeeded", "Failed"):
+            break
+        time.sleep(2)
+    log = ""
+    try:
+        log = core.read_namespaced_pod_log(name=pod_name, namespace=team) or ""
+    except ApiException:
+        pass
+    try:
+        core.delete_namespaced_pod(name=pod_name, namespace=team)
+    except ApiException:
+        pass
+    if phase != "Succeeded" or "MKDIR-OK" not in log:
+        raise WujiError(
+            f"在 NAS 上建团队目录失败(phase={phase})。请确认 NAS {nas_server}:{nas_base} "
+            f"可写、路径存在。helper 输出:{log.strip()[:200] or '(空)'}"
+        )
+
+
+def register_team(
+    team: str,
+    *,
+    apiserver: str = DEFAULT_APISERVER,
+    nas_server: str = NAS_SERVER,
+    nas_base: str = NAS_BASE,
+    storage: str = "10Ti",
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Admin-only: onboard a team end-to-end and return its ready-to-use kubeconfig.
+
+    Creates (all idempotent, non-destructive — existing objects are left as-is):
+    namespace, NAS ``<team>-nas-pv``/``<team>-nas`` (RWX, mounted at /workspace),
+    ServiceAccount ``<team>``, Role ``<team>-volcano`` + RoleBinding, shared
+    ClusterRole ``volcano-cluster-viewer`` + per-team ClusterRoleBinding, and a
+    long-lived token Secret. Builds a kubeconfig (embedded CA + token, default
+    namespace = team, server = ``apiserver``) and returns it as a YAML string.
+
+    ACR is intentionally NOT touched: the platform credential-helper injects
+    ``acr-credential-secret-aggregation`` into every namespace and binds it to the
+    default ServiceAccount, so image pulls work without this command handling any
+    registry credential.
+
+    Args:
+        team: team name = namespace (must be a valid DNS-1123 label).
+        apiserver: API server URL baked into the generated kubeconfig.
+        nas_server/nas_base: NFS coordinates; the team dir is ``<nas_base>/<team>``.
+        storage: PV/PVC capacity string. dry_run: only return the plan, create nothing.
+
+    Returns:
+        ``{team, namespace, kubeconfig, apiserver, nas_pvc, created: [...], plan?}``.
+        When ``dry_run`` is True, ``kubeconfig`` is empty and ``plan`` lists the
+        objects that would be created.
+
+    Raises:
+        WujiError: on invalid name, insufficient privilege, or any API failure.
+    """
+    team = (team or "").strip()
+    if not _TEAM_NAME_RE.match(team) or len(team) > 63:
+        raise WujiError(
+            f"团队名 {team!r} 非法:须是合法 k8s 名(小写字母/数字/-,以字母数字开头结尾,≤63 字符)。"
+        )
+
+    plan = [
+        f"namespace/{team}",
+        f"persistentvolume/{team}-nas-pv  (NFS {nas_server}:{nas_base}/{team}, {storage}, RWX)",
+        f"persistentvolumeclaim/{team}/{team}-nas  -> /workspace",
+        f"serviceaccount/{team}/{team}",
+        f"role/{team}/{team}-volcano  (+ rolebinding)",
+        f"clusterrole/{_CLUSTER_VIEWER_NAME} (shared) + clusterrolebinding/{team}-volcano-viewer",
+        f"secret/{team}/{team}-token  (long-lived SA token)",
+        f"kubeconfig  (server={apiserver}, ns={team})",
+    ]
+    if dry_run:
+        return {
+            "team": team, "namespace": team, "kubeconfig": "",
+            "apiserver": apiserver, "nas_pvc": f"{team}-nas",
+            "created": [], "plan": plan,
+        }
+
+    load_clients()  # ensure kube config is loaded before building extra clients
+    _require_admin()
+    core = client.CoreV1Api()
+    rbac = client.RbacAuthorizationV1Api()
+    created: List[str] = []
+
+    # 1) namespace (must exist before namespaced objects / helper pod)
+    if _ignore_conflict(core.create_namespace, {"metadata": {"name": team}}):
+        created.append(f"namespace/{team}")
+
+    # 2) NAS dir + PV + PVC
+    _nas_mkdir(core, team, nas_server, nas_base)
+    pv_body = {
+        "apiVersion": "v1", "kind": "PersistentVolume",
+        "metadata": {"name": f"{team}-nas-pv"},
+        "spec": {
+            "capacity": {"storage": storage},
+            "accessModes": ["ReadWriteMany"],
+            "persistentVolumeReclaimPolicy": "Retain",
+            "mountOptions": list(_NAS_MOUNT_OPTIONS),
+            "nfs": {"server": nas_server, "path": f"{nas_base}/{team}"},
+        },
+    }
+    if _ignore_conflict(core.create_persistent_volume, pv_body):
+        created.append(f"pv/{team}-nas-pv")
+    pvc_body = {
+        "apiVersion": "v1", "kind": "PersistentVolumeClaim",
+        "metadata": {"name": f"{team}-nas", "namespace": team},
+        "spec": {
+            "accessModes": ["ReadWriteMany"],
+            "resources": {"requests": {"storage": storage}},
+            "volumeName": f"{team}-nas-pv",
+        },
+    }
+    if _ignore_conflict(core.create_namespaced_persistent_volume_claim, team, pvc_body):
+        created.append(f"pvc/{team}-nas")
+
+    # 3) SA + Role + RoleBinding
+    if _ignore_conflict(core.create_namespaced_service_account, team, {"metadata": {"name": team}}):
+        created.append(f"sa/{team}")
+    role_body = {
+        "metadata": {"name": f"{team}-volcano", "namespace": team},
+        "rules": _TEAM_ROLE_RULES,
+    }
+    if _ignore_conflict(rbac.create_namespaced_role, team, role_body):
+        created.append(f"role/{team}-volcano")
+    rb_body = {
+        "metadata": {"name": f"{team}-volcano", "namespace": team},
+        "roleRef": {
+            "apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": f"{team}-volcano",
+        },
+        "subjects": [{"kind": "ServiceAccount", "name": team, "namespace": team}],
+    }
+    if _ignore_conflict(rbac.create_namespaced_role_binding, team, rb_body):
+        created.append(f"rolebinding/{team}-volcano")
+
+    # 4) shared read-only ClusterRole + per-team binding
+    _ignore_conflict(
+        rbac.create_cluster_role,
+        {"metadata": {"name": _CLUSTER_VIEWER_NAME}, "rules": _CLUSTER_VIEWER_RULES},
+    )
+    crb_body = {
+        "metadata": {"name": f"{team}-volcano-viewer"},
+        "roleRef": {
+            "apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole",
+            "name": _CLUSTER_VIEWER_NAME,
+        },
+        "subjects": [{"kind": "ServiceAccount", "name": team, "namespace": team}],
+    }
+    if _ignore_conflict(rbac.create_cluster_role_binding, crb_body):
+        created.append(f"clusterrolebinding/{team}-volcano-viewer")
+
+    # 5) long-lived token Secret (k8s 1.24+ doesn't auto-create SA token secrets)
+    sec_body = {
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": {
+            "name": f"{team}-token", "namespace": team,
+            "annotations": {"kubernetes.io/service-account.name": team},
+        },
+        "type": "kubernetes.io/service-account-token",
+    }
+    if _ignore_conflict(core.create_namespaced_secret, team, sec_body):
+        created.append(f"secret/{team}-token")
+
+    token = ca_b64 = ""
+    for _ in range(20):  # controller injects token/ca into the secret asynchronously
+        try:
+            sec = core.read_namespaced_secret(name=f"{team}-token", namespace=team)
+        except ApiException:
+            time.sleep(1)
+            continue
+        data = sec.data or {}
+        if data.get("token"):
+            token = base64.b64decode(data["token"]).decode("utf-8")
+            ca_b64 = data.get("ca.crt", "")  # already base64 (PEM) — kubeconfig wants b64
+            break
+        time.sleep(1)
+    if not token:
+        raise WujiError(
+            f"团队资源已建,但 token 未注入 Secret {team}-token(稍后重跑本命令会复用已建资源并生成 kubeconfig)。"
+        )
+
+    # 6) assemble kubeconfig
+    kubeconfig = {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": [
+            {"name": "wuji", "cluster": {"server": apiserver, "certificate-authority-data": ca_b64}}
+        ],
+        "contexts": [
+            {"name": team, "context": {"cluster": "wuji", "namespace": team, "user": team}}
+        ],
+        "current-context": team,
+        "users": [{"name": team, "user": {"token": token}}],
+    }
+    import yaml  # provided transitively by kubernetes
+
+    return {
+        "team": team,
+        "namespace": team,
+        "kubeconfig": yaml.safe_dump(kubeconfig, sort_keys=False),
+        "apiserver": apiserver,
+        "nas_pvc": f"{team}-nas",
+        "created": created,
+    }

@@ -149,6 +149,88 @@ def login(
 
 
 # --------------------------------------------------------------------------- #
+# register — 【管理员】一键开通团队 + 生成 kubeconfig
+# --------------------------------------------------------------------------- #
+@app.command()
+def register(
+    team: str = typer.Argument(
+        ..., help="团队名 = namespace(合法 k8s 名:小写字母/数字/-,以字母数字开头结尾)。"
+    ),
+    out: Optional[str] = typer.Option(
+        None, "--out", "-o", help="kubeconfig 写入路径,默认 ./<团队>.kubeconfig。"
+    ),
+    apiserver: Optional[str] = typer.Option(
+        None, "--apiserver", help="写进生成 kubeconfig 的 apiserver 地址(默认平台公网端点)。"
+    ),
+    storage: str = typer.Option("10Ti", "--storage", help="团队 NAS PV/PVC 容量。"),
+    print_only: bool = typer.Option(
+        False, "--print", help="把 kubeconfig 打到屏幕而非写文件。"
+    ),
+    force: bool = typer.Option(False, "--force", help="输出文件已存在时覆盖(默认拒绝)。"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只打印将创建的资源,不真建。"),
+) -> None:
+    """【管理员】一键开通一个团队并生成它的 kubeconfig。
+
+    需要**管理员 kubeconfig**(能建 namespace / clusterrolebinding);普通团队身份会被拒。
+    幂等:重复跑不会破坏已存在的资源,只补齐缺的并重新生成 kubeconfig。
+
+    做的事(= 老 add-team.sh + grant-volcano-kubeconfig.sh):建 ns + NAS `<团队>-nas`
+    PV/PVC(挂 /workspace)+ SA/Role/RoleBinding + 只读集群视图 + 长期 token → 生成
+    `<团队>.kubeconfig`。**不碰 ACR**——平台已自动给每个 ns 注入拉取凭据。
+
+    用法:`volcano register <团队>`,把生成的 kubeconfig 安全发给团队,对方 `volcano login -f` 即用。
+    """
+    kwargs: dict = {"storage": storage, "dry_run": dry_run}
+    if apiserver:
+        kwargs["apiserver"] = apiserver
+    try:
+        result = sdk.register_team(team, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - friendly exit
+        _die(exc)
+
+    if dry_run:
+        _echo(f"[dry-run] 将为团队 {team} 创建(去掉 --dry-run 即真正执行):")
+        for p in result.get("plan", []):
+            _echo(f"  - {p}")
+        return
+
+    kc = result["kubeconfig"]
+    if print_only:
+        _echo(kc)
+    else:
+        import os
+        import pathlib
+
+        target = pathlib.Path(out) if out else pathlib.Path(f"./{team}.kubeconfig")
+        if target.exists() and not force:
+            _err(
+                f"{target} 已存在;用 --force 覆盖、--out 换路径,或 --print 打到屏幕。"
+            )
+            raise typer.Exit(code=1)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(kc, encoding="utf-8")
+        except OSError as exc:
+            _err(f"写入 {target} 失败:{exc}")
+            raise typer.Exit(code=1)
+        try:
+            os.chmod(target, 0o600)  # POSIX 生效;Windows 上是 no-op(靠 NTFS ACL)
+        except OSError:
+            pass
+        _echo(f"✅ 团队 {team} 已开通。kubeconfig -> {target}")
+
+    if result.get("created"):
+        _echo("  新建资源: " + ", ".join(result["created"]))
+    else:
+        _echo("  (资源均已存在,复用;仅重新生成 kubeconfig)")
+    _echo(f"  NAS: {result['nas_pvc']} → /workspace    apiserver: {result['apiserver']}")
+    _echo(
+        "分发:把该 kubeconfig 安全发给团队(含长期 token,勿群发/入 git);"
+        "对方 `volcano login -f <文件>` 即可用。"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # submit
 # --------------------------------------------------------------------------- #
 def _submit_impl(
