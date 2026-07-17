@@ -152,6 +152,7 @@ def login(
 # whoami — 我是谁 / 是不是管理员 / 默认投哪个队列
 # --------------------------------------------------------------------------- #
 @app.command()
+@app.command("who", hidden=True)
 def whoami() -> None:
     """看当前 kubeconfig 的身份:namespace、是否管理员(能否用 register/set)、默认队列。"""
     try:
@@ -172,6 +173,7 @@ def whoami() -> None:
 # grant-admin — 【管理员】把某人设为平台管理员
 # --------------------------------------------------------------------------- #
 @app.command(name="grant-admin")
+@app.command("ga", hidden=True)
 def grant_admin_cmd(
     namespace: str = typer.Argument(..., help="要设为管理员的人(namespace);绑定其同名 SA。"),
     sa: Optional[str] = typer.Option(None, "--sa", help="该 ns 下的 SA 名(默认 = namespace)。"),
@@ -203,6 +205,7 @@ def grant_admin_cmd(
 # register — 【管理员】一键开通团队 + 生成 kubeconfig
 # --------------------------------------------------------------------------- #
 @app.command()
+@app.command("reg", hidden=True)
 def register(
     team: str = typer.Argument(
         ..., help="团队名 = namespace(合法 k8s 名:小写字母/数字/-,以字母数字开头结尾)。"
@@ -324,6 +327,7 @@ def set_cmd(
 
 
 @app.command(name="set-queue")
+@app.command("sq", hidden=True)
 def set_queue_cmd(
     team: str = typer.Argument(..., help="团队队列名(= 团队)。"),
     deserved: Optional[int] = typer.Option(
@@ -741,6 +745,7 @@ def save(
 # images — 可拉取的镜像清单(平台索引,免 ACR 凭据)
 # --------------------------------------------------------------------------- #
 @app.command()
+@app.command("img", hidden=True)
 def images(
     team: Optional[str] = typer.Option(
         None, "--team", "-t", help="只看某团队保存的镜像(基础镜像始终显示)。"
@@ -842,6 +847,7 @@ def list_cmd(
 # status
 # --------------------------------------------------------------------------- #
 @app.command()
+@app.command("st", hidden=True)
 def status(
     name: str = typer.Argument(..., help="任务名。"),
     team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
@@ -867,6 +873,7 @@ def status(
 # logs
 # --------------------------------------------------------------------------- #
 @app.command()
+@app.command("log", hidden=True)
 def logs(
     name: str = typer.Argument(..., help="任务名。"),
     team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
@@ -1114,6 +1121,7 @@ def ssh_cmd(
 
 
 @app.command()
+@app.command("fwd", hidden=True)
 def forward(
     name: str = typer.Argument(..., help="任务名。"),
     port: int = typer.Argument(..., help="容器端口(如 6006 TensorBoard、8265 Ray Dashboard)。"),
@@ -1171,6 +1179,7 @@ def _queue_row(q: dict) -> List[str]:
 
 @app.command("volumes")
 @app.command("vols", hidden=True)
+@app.command("vol", hidden=True)
 def volumes(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="团队=namespace。"),
 ) -> None:
@@ -1195,6 +1204,7 @@ def volumes(
 
 
 @app.command()
+@app.command("q", hidden=True)
 def queue() -> None:
     """列出各 Volcano 队列的 GPU/CPU/内存 配额与用量。"""
     try:
@@ -1243,6 +1253,7 @@ def top() -> None:
 
 
 @app.command()
+@app.command("use", hidden=True)
 def usage(
     team: Optional[str] = typer.Option(
         None, "--team", "-t", help="只看某人/团队(namespace);默认列所有在占 GPU 的。"
