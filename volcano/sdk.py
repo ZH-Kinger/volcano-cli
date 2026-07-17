@@ -1581,16 +1581,29 @@ _QUOTA_NAME = "gpu-quota"
 def resolve_default_queue(team: Optional[str] = None) -> str:
     """Resolve the queue a submission should default to = the person's team.
 
-    Reads the ``wuji.io/team`` label on the current namespace. Falls back to
-    ``"default"`` if the label is absent or the namespace can't be read (e.g. a
-    user without namespace read — routing then just uses the shared pool).
+    Reads the ``wuji.io/team`` label on the current namespace and uses it as the
+    queue — **but only if a Queue by that name actually exists**; otherwise (or if
+    the label is absent / the namespace can't be read) falls back to ``"default"``.
+    Validating existence means labelling a namespace with a team that has no
+    dedicated queue (e.g. under the single-``default``-queue model) never routes a
+    submit to a non-existent queue (which Volcano would reject).
     """
     try:
         ns = current_namespace(team)
-        core, _, _ = load_clients()
+        core, _, custom = load_clients()
         obj = core.read_namespace(name=ns)
         labels = (obj.metadata.labels or {}) if obj.metadata else {}
-        return labels.get(TEAM_LABEL) or "default"
+        q = labels.get(TEAM_LABEL)
+        if not q or q == "default":
+            return "default"
+        try:
+            custom.get_cluster_custom_object(
+                group=VOLCANO_QUEUE_GROUP, version=VOLCANO_QUEUE_VERSION,
+                plural=VOLCANO_QUEUE_PLURAL, name=q,
+            )
+            return q  # queue exists → route there
+        except ApiException:
+            return "default"  # labelled queue doesn't exist → don't break submit
     except Exception:  # noqa: BLE001 - never block submit on queue resolution
         return "default"
 
@@ -1953,3 +1966,57 @@ def grant_admin(
     except ApiException as exc:
         raise WujiError(humanize_api_exception(exc)) from exc
     return {"namespace": namespace, "sa": sa, "role": role, "binding": crb_name}
+
+
+def list_teams() -> List[Dict[str, Any]]:
+    """List registered team namespaces (those carrying the ``wuji.io/team`` label).
+
+    For each team returns ``{namespace, team, gpu_quota, gpu_used, pods}``:
+      - ``gpu_quota``: the ns ResourceQuota ``gpu-quota`` GPU hard limit ("-" if
+        none, or unreadable — quota read is cluster-wide, admin-only).
+      - ``gpu_used``/``pods``: live GPU/pod count for the ns (from pods, which the
+        shared cluster-viewer role can read, so ordinary users see this too).
+
+    Reading namespaces + pods only needs the ``volcano-cluster-viewer`` role, so
+    this works for any registered user; the quota column degrades to "-" when the
+    caller can't read ResourceQuotas cluster-wide.
+    """
+    core, _, _ = load_clients()
+    try:
+        nss = core.list_namespace(label_selector=TEAM_LABEL)
+    except ApiException as exc:
+        raise WujiError(humanize_api_exception(exc)) from exc
+
+    used: Dict[str, Dict[str, Any]] = {}
+    try:
+        for u in usage_by_namespace(None):
+            used[u["namespace"]] = u
+    except Exception:  # noqa: BLE001 - usage is best-effort
+        pass
+
+    quota: Dict[str, str] = {}
+    try:
+        rqs = core.list_resource_quota_for_all_namespaces()
+        for r in rqs.items:
+            if r.metadata.name == _QUOTA_NAME:
+                hard = (r.spec.hard or {}) if r.spec else {}
+                quota[r.metadata.namespace] = hard.get("requests.nvidia.com/gpu", "-")
+    except ApiException:
+        pass  # not permitted to list quotas cluster-wide → leave "-"
+
+    out: List[Dict[str, Any]] = []
+    for ns in nss.items:
+        name = ns.metadata.name
+        labels = (ns.metadata.labels or {}) if ns.metadata else {}
+        u = used.get(name, {})
+        out.append(
+            {
+                "namespace": name,
+                "team": labels.get(TEAM_LABEL, ""),
+                "gpu_quota": quota.get(name, "-"),
+                "gpu_used": int(u.get("gpu", 0)),
+                "pods": int(u.get("pods", 0)),
+            }
+        )
+    out.sort(key=lambda t: t["namespace"])
+    return out

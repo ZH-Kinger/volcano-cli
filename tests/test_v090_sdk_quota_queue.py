@@ -81,25 +81,79 @@ class _NsCore:
         return SimpleNamespace(metadata=SimpleNamespace(labels=self.labels))
 
 
-def _wire_resolve(monkeypatch, core, ns="alice"):
+class _QueueGetCustom:
+    """Fake CustomObjectsApi for resolve_default_queue's queue-existence check.
+
+    The hardened resolve_default_queue only routes to the team queue when a Queue
+    by that name actually exists — it does a ``get_cluster_custom_object`` and only
+    returns the team on success. ``exists=True`` → the get returns an object;
+    ``exc`` → the get raises it (e.g. 404 ApiException = queue absent). Every call
+    is recorded in ``gets`` so tests can assert it was (or wasn't) consulted.
+    """
+
+    def __init__(self, exists=True, exc=None):
+        self.exists = exists
+        self.exc = exc
+        self.gets = []
+
+    def get_cluster_custom_object(self, **kw):
+        self.gets.append(kw)
+        if self.exc is not None:
+            raise self.exc
+        return {"metadata": {"name": kw.get("name")}}
+
+
+def _wire_resolve(monkeypatch, core, ns="alice", custom=None):
     monkeypatch.setattr(sdk, "current_namespace", lambda team=None: ns)
-    monkeypatch.setattr(sdk, "load_clients", lambda: (core, None, None))
+    monkeypatch.setattr(sdk, "load_clients", lambda: (core, None, custom))
 
 
 def test_resolve_default_queue_label_present(monkeypatch):
+    # label=team AND a Queue named after it exists -> route to the team queue.
     core = _NsCore(labels={TEAM_LABEL: "redteam", "other": "x"})
-    _wire_resolve(monkeypatch, core)
+    custom = _QueueGetCustom(exists=True)
+    _wire_resolve(monkeypatch, core, custom=custom)
     assert sdk.resolve_default_queue() == "redteam"
     assert core.read == ["alice"]  # read the resolved ns
+    assert custom.gets[0]["name"] == "redteam"  # validated queue existence
 
 
 def test_resolve_default_queue_team_arg_threaded(monkeypatch):
     core = _NsCore(labels={TEAM_LABEL: "blueteam"})
+    custom = _QueueGetCustom(exists=True)
     seen = {}
     monkeypatch.setattr(sdk, "current_namespace", lambda team=None: seen.setdefault("t", team) or "bob")
-    monkeypatch.setattr(sdk, "load_clients", lambda: (core, None, None))
+    monkeypatch.setattr(sdk, "load_clients", lambda: (core, None, custom))
     assert sdk.resolve_default_queue("bob") == "blueteam"
     assert seen["t"] == "bob"
+    assert custom.gets[0]["name"] == "blueteam"
+
+
+def test_resolve_default_queue_labelled_but_queue_absent_is_default(monkeypatch):
+    # label=team but NO such Queue (get 404) -> fall back to "default" so a submit
+    # is never routed to a non-existent queue (which Volcano would reject).
+    core = _NsCore(labels={TEAM_LABEL: "orphanteam"})
+    custom = _QueueGetCustom(exc=ApiException(status=404))
+    _wire_resolve(monkeypatch, core, custom=custom)
+    assert sdk.resolve_default_queue() == "default"
+    assert custom.gets[0]["name"] == "orphanteam"  # it did try to validate
+
+
+def test_resolve_default_queue_queue_get_non404_is_default(monkeypatch):
+    # any ApiException from the queue get (e.g. 403/500) -> "default", not a raise.
+    core = _NsCore(labels={TEAM_LABEL: "redteam"})
+    custom = _QueueGetCustom(exc=ApiException(status=500))
+    _wire_resolve(monkeypatch, core, custom=custom)
+    assert sdk.resolve_default_queue() == "default"
+
+
+def test_resolve_default_queue_label_default_skips_queue_get(monkeypatch):
+    # label literally "default" -> "default" WITHOUT a queue-existence probe.
+    core = _NsCore(labels={TEAM_LABEL: "default"})
+    custom = _QueueGetCustom(exc=AssertionError("must not probe queue for 'default'"))
+    _wire_resolve(monkeypatch, core, custom=custom)
+    assert sdk.resolve_default_queue() == "default"
+    assert custom.gets == []  # never consulted the queue API
 
 
 def test_resolve_default_queue_no_label_is_default(monkeypatch):

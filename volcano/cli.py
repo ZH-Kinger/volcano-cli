@@ -1285,6 +1285,34 @@ def usage(
 
 
 # --------------------------------------------------------------------------- #
+# teams — 列出所有团队 namespace
+# --------------------------------------------------------------------------- #
+@app.command()
+@app.command("tm", hidden=True)
+def teams() -> None:
+    """列出所有团队 namespace(带 wuji.io/team 标签的)+ GPU 配额与用量。
+
+    让大家知道有哪些 ns/team。GPU配额来自各 ns 的 ResourceQuota(读不到显示 -,
+    需集群级读权限);GPU已用/Pods 为实时统计(普通用户经 cluster-viewer 也能看)。
+    """
+    try:
+        rows = sdk.list_teams()
+    except Exception as exc:  # noqa: BLE001
+        _die(exc)
+    if not rows:
+        _echo("(还没有带 wuji.io/team 标签的团队 —— 管理员可用 `volcano set <ns> --team <名>` 打标签)")
+        return
+    _print_table(
+        "团队 namespace",
+        ["命名空间", "团队", "GPU配额", "GPU已用", "Pods"],
+        [
+            [r["namespace"], r["team"] or "-", r["gpu_quota"], r["gpu_used"], r["pods"]]
+            for r in rows
+        ],
+    )
+
+
+# --------------------------------------------------------------------------- #
 # data ls
 # --------------------------------------------------------------------------- #
 @data_app.command("ls")

@@ -33,4 +33,4 @@ __all__ = [
     "build_volcano_job",
 ]
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
