@@ -93,6 +93,7 @@ def test_submit_accepts_in_range_nodeport(monkeypatch):
     monkeypatch.setattr(cli.sdk, "ssh_endpoint", lambda name, team=None: {
         "public_ip": "1.2.3.4", "node_port": 30000, "node": "wuji-1"
     })
+    monkeypatch.setattr(cli.getpass, "getpass", lambda *_a, **_k: "hunter2")
     result = runner.invoke(
         cli.app,
         ["submit", "--name", "j", "-t", "teamx", "--image", "img", "--cmd", "c",
@@ -102,26 +103,52 @@ def test_submit_accepts_in_range_nodeport(monkeypatch):
     assert captured["ssh_node_port"] == 30000
 
 
-def test_submit_generated_password_echoed(monkeypatch):
-    monkeypatch.setattr(cli.sdk, "submit", lambda **kw: {"_ssh_generated_password": "abc123XYZ"})
+def test_submit_ssh_no_command_line_password_option(monkeypatch):
+    # punchlist: SSH password has NO command-line/scripting path at all anymore
+    # — --ssh-password / --ssh-password-prompt were removed entirely, always
+    # an interactive getpass prompt when SSH is enabled.
+    result = runner.invoke(
+        cli.app,
+        ["submit", "--name", "j", "-t", "teamx", "--image", "img", "--cmd", "c",
+         "--ssh-password", "hunter2"],
+    )
+    assert result.exit_code != 0
+    assert "no such option" in result.output.lower()
+
+
+def test_submit_ssh_password_prompt_flag_no_longer_exists(monkeypatch):
+    result = runner.invoke(
+        cli.app,
+        ["submit", "--name", "j", "-t", "teamx", "--image", "img", "--cmd", "c",
+         "--ssh-password-prompt"],
+    )
+    assert result.exit_code != 0
+    assert "no such option" in result.output.lower()
+
+
+def test_submit_ssh_auto_prompt_uses_getpass_not_echoed(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(cli.sdk, "submit", lambda **kw: captured.update(kw) or {})
+    monkeypatch.setattr(cli.getpass, "getpass", lambda *_a, **_k: "typed-in-secret")
     result = runner.invoke(
         cli.app,
         ["submit", "--name", "j", "-t", "teamx", "--image", "img", "--cmd", "c", "--ssh"],
     )
     assert result.exit_code == 0, result.output
-    assert "abc123XYZ" in result.output
+    assert captured["ssh_password"] == "typed-in-secret"
+    # the typed secret itself must never be echoed anywhere
+    assert "typed-in-secret" not in result.output
 
 
-def test_submit_passes_ssh_pubkey_to_sdk(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(cli.sdk, "submit", lambda **kw: captured.update(kw) or {})
+def test_submit_ssh_auto_prompt_empty_rejected(monkeypatch):
+    monkeypatch.setattr(cli.sdk, "submit", lambda **kw: {})
+    monkeypatch.setattr(cli.getpass, "getpass", lambda *_a, **_k: "")
     result = runner.invoke(
         cli.app,
-        ["submit", "--name", "j", "-t", "teamx", "--image", "img", "--cmd", "c",
-         "--ssh-pubkey", "ssh-ed25519 AAAA user@host"],
+        ["submit", "--name", "j", "-t", "teamx", "--image", "img", "--cmd", "c", "--ssh"],
     )
-    assert result.exit_code == 0, result.output
-    assert captured["ssh_pubkey"] == "ssh-ed25519 AAAA user@host"
+    assert result.exit_code != 0
+    assert "不能为空" in result.output
 
 
 # --------------------------------------------------------------------------- #
@@ -147,6 +174,7 @@ def test_submit_passes_expose_ssh_flags_to_sdk(monkeypatch):
     monkeypatch.setattr(cli.sdk, "ssh_endpoint", lambda name, team=None: {
         "public_ip": "1.2.3.4", "node_port": 31000, "node": "wuji-1"
     })
+    monkeypatch.setattr(cli.getpass, "getpass", lambda *_a, **_k: "hunter2")
     result = runner.invoke(
         cli.app,
         ["submit", "--name", "j", "-t", "teamx", "--image", "img",
@@ -160,6 +188,7 @@ def test_submit_passes_expose_ssh_flags_to_sdk(monkeypatch):
 
 def test_submit_ssh_hint_when_ssh_flag(monkeypatch):
     monkeypatch.setattr(cli.sdk, "submit", lambda **kw: {})
+    monkeypatch.setattr(cli.getpass, "getpass", lambda *_a, **_k: "hunter2")
     result = runner.invoke(
         cli.app,
         ["submit", "--name", "j", "-t", "teamx", "--image", "img", "--cmd", "c", "--ssh"],

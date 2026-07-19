@@ -180,11 +180,13 @@ volcano exec mydev             # 进容器
 | 参数 | 说明 |
 |---|---|
 | `--ssh` | 在容器里起 sshd(root),之后 `volcano ssh` 进入 |
-| `--ssh-password` | root 密码(写进 Job env,同 ns 可见)。**不给则自动生成随机密码**,提交后打印一次 |
-| `--ssh-pubkey` | SSH 公钥(**文件路径或公钥内容**);给了则关口令登录,公网暴露首选 |
 | `--ssh-port` | 容器内 sshd 端口 | 
 | `--expose-ssh` | 建 NodePort 把 SSH 暴露到节点弹性公网 IP,可 `ssh` 单跳直连(隐含 `--ssh`) |
 | `--ssh-nodeport` | 固定 NodePort(30000-32767);默认自动分配 |
+
+SSH 只支持密码登录(不读取/存储任何本机凭据,没有公钥选项),且密码**没有任何命令行/
+脚本传值路径**——开了 `--ssh`/`--expose-ssh` 就自动交互式弹出密码输入(不回显、不进
+shell history),没有对应的 `--ssh-password` 之类的 flag。
 
 `--ssh-port` 默认 22。`--expose-ssh` 多机(`--nodes>1`)时**每个 worker 一个独立公网入口**,
 提交后逐个打印 `ssh -p <NodePort> root@<公网IP>`。

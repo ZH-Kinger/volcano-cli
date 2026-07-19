@@ -36,9 +36,11 @@ def _guard_no_kube(monkeypatch):
 def _capture_set_quota(monkeypatch, ret):
     captured = {}
 
-    def fake(namespace, *, gpu=None, cpu=None, memory=None, pods=None, team=None, clear=False):
+    def fake(namespace, *, gpu=None, cpu=None, memory=None, pods=None, team=None, clear=False,
+             home_node=None, no_home_node=False):
         captured.update(namespace=namespace, gpu=gpu, cpu=cpu, memory=memory,
-                        pods=pods, team=team, clear=clear)
+                        pods=pods, team=team, clear=clear,
+                        home_node=home_node, no_home_node=no_home_node)
         return ret
 
     monkeypatch.setattr(cli.sdk, "set_quota", fake)
@@ -140,6 +142,43 @@ def test_set_wuji_error_friendly_exit(monkeypatch):
     assert result.exit_code == 1
     assert "需要管理员" in result.output
     assert not isinstance(result.exception, cli.WujiError)  # no leaked traceback
+
+
+# --------------------------------------------------------------------------- #
+# set: --home-node / --no-home-node (punchlist §8)
+# --------------------------------------------------------------------------- #
+def test_set_home_node_flag_threaded_and_echoed(monkeypatch):
+    _guard_no_kube(monkeypatch)
+    captured = _capture_set_quota(monkeypatch, {
+        "namespace": "alice", "team": None, "quota": None, "home_node": "wuji-2",
+    })
+    result = runner.invoke(cli.app, ["set", "alice", "--home-node", "wuji-2"])
+    assert result.exit_code == 0, result.output
+    assert captured["home_node"] == "wuji-2"
+    assert captured["no_home_node"] is False
+    assert "优先 wuji-2" in result.output
+
+
+def test_set_no_home_node_flag_threaded_and_echoed(monkeypatch):
+    _guard_no_kube(monkeypatch)
+    captured = _capture_set_quota(monkeypatch, {
+        "namespace": "alice", "team": None, "quota": None, "home_node": None,
+    })
+    result = runner.invoke(cli.app, ["set", "alice", "--no-home-node"])
+    assert result.exit_code == 0, result.output
+    assert captured["no_home_node"] is True
+    assert "已取消" in result.output and "软亲和" in result.output
+
+
+def test_set_no_args_reports_current_home_node(monkeypatch):
+    # Viewing (no --home-node/--no-home-node this call) surfaces the existing setting.
+    _guard_no_kube(monkeypatch)
+    _capture_set_quota(monkeypatch, {
+        "namespace": "alice", "team": None, "quota": None, "home_node": "wuji-4",
+    })
+    result = runner.invoke(cli.app, ["set", "alice"])
+    assert result.exit_code == 0, result.output
+    assert "当前主机软亲和" in result.output and "wuji-4" in result.output
 
 
 # =========================================================================== #

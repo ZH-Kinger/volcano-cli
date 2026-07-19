@@ -41,6 +41,18 @@ TEAM_LABEL = "wuji.io/team"
 # reachable ``ssh root@<ip> -p <nodeport>`` line for --expose-ssh jobs.
 NODE_PUBLIC_IP_ANNOTATION = "wuji.io/public-ip"
 
+# mutations.gatekeeper.sh/v1 Assign (cluster-scoped) — used for per-namespace
+# home-node soft affinity (`volcano set <ns> --home-node <node>`). Volcano's own
+# nodegroup scheduler plugin was evaluated for this and rejected: on this
+# cluster's v1.10.0 it has no soft/optional mode at all, and even upstream
+# master still hard-filters once a queue has any nodeGroupAffinity configured
+# (see punchlist §8) — a real k8s-native `preferredDuringSchedulingIgnoredDuringExecution`
+# injected via Gatekeeper is the only mechanism that's genuinely soft (scoring-only,
+# never excludes other nodes).
+GATEKEEPER_MUTATIONS_GROUP = "mutations.gatekeeper.sh"
+GATEKEEPER_ASSIGN_VERSION = "v1"
+GATEKEEPER_ASSIGN_PLURAL = "assign"
+
 # --- volcano save (platform-delegated image commit) ---------------------------
 # A `volcano save` request is just a ConfigMap in the user's namespace carrying
 # this label; the privileged `wuji-saver` DaemonSet watches for it, commits the
