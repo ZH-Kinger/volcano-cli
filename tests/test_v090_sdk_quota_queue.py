@@ -243,6 +243,40 @@ class _QuotaCore:
         raise ApiException(status=404)
 
 
+class _FakeAssignCustom:
+    """Minimal CustomObjectsApi stand-in for the Gatekeeper Assign calls used by
+    get_home_node/set_home_node/clear_home_node. Defaults to "nothing set" (404
+    on read) unless seeded via ``existing``."""
+
+    def __init__(self, *, existing=None):
+        self.existing = dict(existing or {})
+        self.calls = []
+
+    def get_cluster_custom_object(self, *, group, version, plural, name):
+        self.calls.append(("get", name))
+        if name in self.existing:
+            return self.existing[name]
+        raise ApiException(status=404)
+
+    def create_cluster_custom_object(self, *, group, version, plural, body):
+        name = body["metadata"]["name"]
+        self.calls.append(("create", name))
+        if name in self.existing:
+            raise ApiException(status=409)
+        self.existing[name] = body
+
+    def patch_cluster_custom_object(self, *, group, version, plural, name, body):
+        self.calls.append(("patch", name))
+        entry = self.existing.setdefault(name, {"metadata": {"name": name}})
+        entry.update(body)
+
+    def delete_cluster_custom_object(self, *, group, version, plural, name):
+        self.calls.append(("delete", name))
+        if name not in self.existing:
+            raise ApiException(status=404)
+        del self.existing[name]
+
+
 def _rq(hard, used):
     # get_quota reads the limit from spec.hard (visible immediately after
     # create/patch) and usage from status.used (filled in by the quota controller).
@@ -289,9 +323,10 @@ def test_get_quota_none_spec_status_maps_empty(monkeypatch):
 # =========================================================================== #
 # set_quota
 # =========================================================================== #
-def _wire_quota_admin(monkeypatch, core):
+def _wire_quota_admin(monkeypatch, core, assign_custom=None):
     """Admin path: _require_admin is a no-op; client.CoreV1Api() -> core."""
-    monkeypatch.setattr(sdk, "load_clients", lambda: (core, None, None))
+    custom = assign_custom if assign_custom is not None else _FakeAssignCustom()
+    monkeypatch.setattr(sdk, "load_clients", lambda: (core, None, custom))
     monkeypatch.setattr(sdk, "_require_admin", lambda: None)
     monkeypatch.setattr(sdk, "client", _client(core=core))
 
@@ -310,7 +345,7 @@ def test_set_quota_requires_admin_denied(monkeypatch):
 def test_set_quota_require_admin_is_invoked(monkeypatch):
     called = {"n": 0}
     core = _QuotaCore()
-    monkeypatch.setattr(sdk, "load_clients", lambda: (core, None, None))
+    monkeypatch.setattr(sdk, "load_clients", lambda: (core, None, _FakeAssignCustom()))
     monkeypatch.setattr(sdk, "_require_admin", lambda: called.__setitem__("n", called["n"] + 1))
     monkeypatch.setattr(sdk, "client", _client(core=core))
     sdk.set_quota("alice", gpu=8)
@@ -328,13 +363,18 @@ def test_set_quota_gpu_maps_requests_and_limits(monkeypatch):
 
 
 def test_set_quota_cpu_memory_pods_mapping(monkeypatch):
+    # cpu/memory map to both requests and limits (same value) — mirrors the GPU
+    # dimension's requests==limits semantics, so the admin-set ceiling is a real
+    # cgroup limit, not just a scheduling-time reservation a pod can burst past.
     core = _QuotaCore()
     _wire_quota_admin(monkeypatch, core)
     sdk.set_quota("alice", cpu="64", memory="256Gi", pods=10)
     hard = core.created_body["spec"]["hard"]
     assert hard == {
         "requests.cpu": "64",
+        "limits.cpu": "64",
         "requests.memory": "256Gi",
+        "limits.memory": "256Gi",
         "pods": "10",
     }
 
@@ -420,6 +460,131 @@ def test_set_quota_no_args_reports_only(monkeypatch):
     assert "create_rq" not in core.names() and "patch_rq" not in core.names()
     assert out["team"] is None
     assert out["quota"]["hard"] == {"pods": "5"}
+
+
+# =========================================================================== #
+# home-node soft affinity (get/set/clear_home_node) — punchlist §8
+# =========================================================================== #
+def _assign_body(namespace, node):
+    from volcano.sdk import _home_node_assign_name, _home_node_assign_spec
+    spec = _home_node_assign_spec(node)
+    spec["match"]["namespaces"] = [namespace]
+    return {"metadata": {"name": _home_node_assign_name(namespace)}, "spec": spec}
+
+
+def test_get_home_node_none_when_absent(monkeypatch):
+    custom = _FakeAssignCustom()
+    monkeypatch.setattr(sdk, "load_clients", lambda: (None, None, custom))
+    assert sdk.get_home_node("alice") is None
+
+
+def test_get_home_node_returns_set_value(monkeypatch):
+    custom = _FakeAssignCustom(existing={"home-node-alice": _assign_body("alice", "wuji-2")})
+    monkeypatch.setattr(sdk, "load_clients", lambda: (None, None, custom))
+    assert sdk.get_home_node("alice") == "wuji-2"
+
+
+def test_get_home_node_malformed_returns_none(monkeypatch):
+    custom = _FakeAssignCustom(existing={"home-node-alice": {"metadata": {"name": "home-node-alice"}, "spec": {}}})
+    monkeypatch.setattr(sdk, "load_clients", lambda: (None, None, custom))
+    assert sdk.get_home_node("alice") is None
+
+
+def test_get_home_node_other_error_raises(monkeypatch):
+    class Boom:
+        def get_cluster_custom_object(self, **kw):
+            raise ApiException(status=500)
+
+    monkeypatch.setattr(sdk, "load_clients", lambda: (None, None, Boom()))
+    with pytest.raises(WujiError):
+        sdk.get_home_node("alice")
+
+
+def test_set_home_node_creates_when_absent(monkeypatch):
+    custom = _FakeAssignCustom()
+    monkeypatch.setattr(sdk, "load_clients", lambda: (None, None, custom))
+    sdk.set_home_node("alice", "wuji-3")
+    assert custom.calls == [("create", "home-node-alice")]
+    assert sdk.get_home_node("alice") == "wuji-3"
+
+
+def test_set_home_node_patches_on_conflict(monkeypatch):
+    custom = _FakeAssignCustom(existing={"home-node-alice": _assign_body("alice", "wuji-0")})
+    monkeypatch.setattr(sdk, "load_clients", lambda: (None, None, custom))
+    sdk.set_home_node("alice", "wuji-3")
+    assert ("create", "home-node-alice") in custom.calls
+    assert ("patch", "home-node-alice") in custom.calls
+    assert sdk.get_home_node("alice") == "wuji-3"
+
+
+def test_set_home_node_pathtests_must_not_exist():
+    # so a user's own pod-spec affinity isn't clobbered by the default.
+    from volcano.sdk import _home_node_assign_spec
+    spec = _home_node_assign_spec("wuji-1")
+    assert spec["parameters"]["pathTests"] == [{
+        "subPath": "spec.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution",
+        "condition": "MustNotExist",
+    }]
+    pref = spec["parameters"]["assign"]["value"][0]
+    assert pref["weight"] == 100
+    assert pref["preference"]["matchExpressions"][0]["values"] == ["wuji-1"]
+
+
+def test_clear_home_node_deletes_and_returns_true(monkeypatch):
+    custom = _FakeAssignCustom(existing={"home-node-alice": _assign_body("alice", "wuji-1")})
+    monkeypatch.setattr(sdk, "load_clients", lambda: (None, None, custom))
+    assert sdk.clear_home_node("alice") is True
+    assert sdk.get_home_node("alice") is None
+
+
+def test_clear_home_node_absent_returns_false(monkeypatch):
+    custom = _FakeAssignCustom()
+    monkeypatch.setattr(sdk, "load_clients", lambda: (None, None, custom))
+    assert sdk.clear_home_node("alice") is False
+
+
+# --- set_quota integration: --home-node/--no-home-node alongside quota/team --- #
+def test_set_quota_home_node_sets_assign(monkeypatch):
+    core = _QuotaCore()
+    custom = _FakeAssignCustom()
+    _wire_quota_admin(monkeypatch, core, assign_custom=custom)
+    out = sdk.set_quota("alice", home_node="wuji-2")
+    assert out["home_node"] == "wuji-2"
+    assert sdk.get_home_node("alice") == "wuji-2"
+
+
+def test_set_quota_no_home_node_clears_assign(monkeypatch):
+    core = _QuotaCore()
+    custom = _FakeAssignCustom(existing={"home-node-alice": _assign_body("alice", "wuji-2")})
+    _wire_quota_admin(monkeypatch, core, assign_custom=custom)
+    out = sdk.set_quota("alice", no_home_node=True)
+    assert out["home_node"] is None
+
+
+def test_set_quota_home_node_and_no_home_node_conflict(monkeypatch):
+    core = _QuotaCore()
+    _wire_quota_admin(monkeypatch, core)
+    with pytest.raises(WujiError, match="只能给一个"):
+        sdk.set_quota("alice", home_node="wuji-2", no_home_node=True)
+
+
+def test_set_quota_reports_current_home_node_when_untouched(monkeypatch):
+    core = _QuotaCore()
+    custom = _FakeAssignCustom(existing={"home-node-alice": _assign_body("alice", "wuji-4")})
+    _wire_quota_admin(monkeypatch, core, assign_custom=custom)
+    out = sdk.set_quota("alice", gpu=8)
+    assert out["home_node"] == "wuji-4"
+
+
+def test_set_quota_home_node_independent_of_team_and_clear(monkeypatch):
+    # --team X --home-node Y --clear in one call: all three take effect.
+    core = _QuotaCore()
+    custom = _FakeAssignCustom()
+    _wire_quota_admin(monkeypatch, core, assign_custom=custom)
+    out = sdk.set_quota("alice", team="redteam", home_node="wuji-1", clear=True)
+    assert out["team"] == "redteam"
+    assert out["home_node"] == "wuji-1"
+    assert out["cleared"] is True
 
 
 # =========================================================================== #

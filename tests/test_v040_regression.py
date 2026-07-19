@@ -227,6 +227,7 @@ def dual_custom(monkeypatch):
 def test_list_jobs_all_namespaces_uses_cluster_object(dual_custom, monkeypatch):
     calls, box = dual_custom
     box["items"] = [_ns_item("a", "team-a", kind="train"), _ns_item("b", "team-b", kind="dev")]
+    monkeypatch.setattr(sdk, "_require_admin", lambda: None)
     # all_namespaces must NOT consult current_namespace (admin/edge view).
     monkeypatch.setattr(
         sdk, "current_namespace",
@@ -240,10 +241,42 @@ def test_list_jobs_all_namespaces_uses_cluster_object(dual_custom, monkeypatch):
 def test_list_jobs_all_namespaces_honors_kind_filter(dual_custom, monkeypatch):
     calls, box = dual_custom
     box["items"] = [_ns_item("a", "team-a", kind="train"), _ns_item("b", "team-b", kind="dev")]
+    monkeypatch.setattr(sdk, "_require_admin", lambda: None)
     monkeypatch.setattr(sdk, "current_namespace", lambda *a, **k: "should-not-be-used")
     out = sdk.list_jobs(all_namespaces=True, kind="train")
     assert [j["name"] for j in out] == ["a"]
     assert out[0]["namespace"] == "team-a"
+
+
+def test_list_jobs_all_namespaces_requires_admin(dual_custom, monkeypatch):
+    # A Job's pod template carries full env/command — same sensitivity as a raw
+    # Pod, so -A must be genuinely admin-gated, not handed to every registered
+    # user via volcano-cluster-viewer (see sdk._CLUSTER_VIEWER_RULES comment).
+    calls, box = dual_custom
+    box["items"] = [_ns_item("a", "team-a", kind="train")]
+
+    def deny():
+        raise sdk.WujiError("该命令需要管理员 kubeconfig")
+
+    monkeypatch.setattr(sdk, "_require_admin", deny)
+    with pytest.raises(sdk.WujiError, match="管理员"):
+        sdk.list_jobs(all_namespaces=True)
+    assert calls["cluster"] == 0  # denied before ever touching the cluster-wide list
+
+
+def test_list_jobs_single_ns_does_not_require_admin(dual_custom, monkeypatch):
+    # Per-own-namespace listing (the common case) must NOT be admin-gated.
+    calls, box = dual_custom
+    box["items"] = [_ns_item("a", "teamx", kind="train")]
+
+    def boom():
+        raise AssertionError("_require_admin must not run for single-namespace list")
+
+    monkeypatch.setattr(sdk, "_require_admin", boom)
+    monkeypatch.setattr(sdk, "current_namespace", lambda *a, **k: "teamx")
+    out = sdk.list_jobs(team="teamx")
+    assert calls["namespaced"] == 1
+    assert [j["name"] for j in out] == ["a"]
 
 
 def test_list_jobs_single_ns_uses_namespaced_object(dual_custom, monkeypatch):

@@ -83,7 +83,7 @@ def test_ssh_true_injects_prologue():
 
 def test_ssh_password_alone_triggers_prologue():
     # ssh=False but password given -> enable_ssh should be True.
-    c = _container(_base(ssh=False, ssh_password="secret"))
+    c = _container(_base(ssh=False, ssh_password="secret", ssh_secret_name="job1-ssh"))
     assert c["command"][2].startswith(_SSH_PROLOGUE)
 
 
@@ -93,34 +93,43 @@ def test_no_ssh_no_prologue():
     assert c["command"][2] == "python train.py"
 
 
-def test_ssh_env_injected():
-    c = _container(_base(ssh=True, ssh_password="pw", ssh_port=2200))
-    env = {e["name"]: e["value"] for e in c["env"]}
-    assert env["WUJI_SSH_PASSWORD"] == "pw"
-    assert env["WUJI_SSH_PORT"] == "2200"  # stringified
+def _secret_ref(container, var_name):
+    """secretKeyRef {name, key} for an env var built via secretKeyRef, or None."""
+    for e in container["env"]:
+        if e["name"] == var_name:
+            return e.get("valueFrom", {}).get("secretKeyRef")
+    return None
 
 
-def test_ssh_password_none_becomes_empty_string():
+def test_ssh_password_env_uses_secret_ref_not_literal():
+    c = _container(_base(ssh=True, ssh_password="pw", ssh_port=2200, ssh_secret_name="job1-ssh"))
+    ref = _secret_ref(c, "WUJI_SSH_PASSWORD")
+    assert ref == {"name": "job1-ssh", "key": "password"}
+    # never a literal value anywhere in the manifest
+    assert all("pw" != e.get("value") for e in c["env"])
+    env_literal = {e["name"]: e.get("value") for e in c["env"] if "value" in e}
+    assert env_literal["WUJI_SSH_PORT"] == "2200"  # stringified, still a plain value
+
+
+def test_ssh_password_absent_when_not_given():
     c = _container(_base(ssh=True))
-    env = {e["name"]: e["value"] for e in c["env"]}
-    assert env["WUJI_SSH_PASSWORD"] == ""
+    names = {e["name"] for e in c["env"]}
+    assert "WUJI_SSH_PASSWORD" not in names
 
 
-def test_ssh_pubkey_alone_triggers_prologue():
-    c = _container(_base(ssh=False, ssh_pubkey="ssh-ed25519 AAAA user@host"))
-    assert c["command"][2].startswith(_SSH_PROLOGUE)
-
-
-def test_ssh_pubkey_env_injected():
-    c = _container(_base(ssh=True, ssh_pubkey="ssh-rsa AAAAB3 user@host"))
-    env = {e["name"]: e["value"] for e in c["env"]}
-    assert env["WUJI_SSH_PUBKEY"] == "ssh-rsa AAAAB3 user@host"
-
-
-def test_ssh_pubkey_empty_when_not_given():
+def test_ssh_true_alone_no_secret_needed():
+    # ssh=True with no password: no secret to reference, no crash — sdk.submit()
+    # never actually calls build_volcano_job in this state (it always resolves a
+    # password first, via CLI-interactive prompt), but build_volcano_job itself
+    # must stay safe for direct callers (e.g. tests, --dry-run with no password).
     c = _container(_base(ssh=True))
-    env = {e["name"]: e["value"] for e in c["env"]}
-    assert env["WUJI_SSH_PUBKEY"] == ""
+    names = {e["name"] for e in c["env"]}
+    assert names == {"WUJI_SSH_PORT"}
+
+
+def test_ssh_password_without_secret_name_raises():
+    with pytest.raises(ValueError, match="ssh_secret_name"):
+        _base(ssh=True, ssh_password="pw")
 
 
 def test_prologue_generates_host_keys():
@@ -128,13 +137,11 @@ def test_prologue_generates_host_keys():
     assert "ssh-keygen -A" in _SSH_PROLOGUE
 
 
-def test_prologue_handles_pubkey_and_password_branches():
-    # gated on either password OR pubkey being present
-    assert '[ -n "$WUJI_SSH_PASSWORD" ] || [ -n "$WUJI_SSH_PUBKEY" ]' in _SSH_PROLOGUE
-    # pubkey is appended to authorized_keys
-    assert "authorized_keys" in _SSH_PROLOGUE
-    # password auth only enabled when a password is set
-    assert "PW_AUTH" in _SSH_PROLOGUE
+def test_prologue_gated_on_password_only():
+    # password-only login (no pubkey option exists) — gated on WUJI_SSH_PASSWORD alone.
+    assert _SSH_PROLOGUE.startswith('if [ -n "$WUJI_SSH_PASSWORD" ]; then')
+    assert "authorized_keys" not in _SSH_PROLOGUE  # no pubkey path at all
+    assert "PasswordAuthentication=yes" in _SSH_PROLOGUE
 
 
 # --------------------------------------------------------------------------- #

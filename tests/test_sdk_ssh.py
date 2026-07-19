@@ -38,6 +38,39 @@ class FakeCore:
         self.created_endpoints = []      # body
         self.replace_ep_exc = None
         self.create_ep_exc = None
+        # --- ssh credential Secret (submit()/kill()) ---
+        self.created_secrets = []        # (namespace, body)
+        self.patched_secrets = []        # (name, namespace, body)
+        self.deleted_secrets = []        # (name, namespace)
+        self.secrets_list = []           # items returned by list_namespaced_secret
+        self.create_secret_exc = None
+        self.patch_secret_exc = None
+        self.delete_secret_exc = None
+        self.list_secret_exc = None
+
+    # --- ssh credential Secret ---
+    def create_namespaced_secret(self, *, namespace, body):
+        self.created_secrets.append((namespace, body))
+        if self.create_secret_exc:
+            raise self.create_secret_exc
+        return body
+
+    def patch_namespaced_secret(self, *, name, namespace, body):
+        if self.patch_secret_exc:
+            raise self.patch_secret_exc
+        self.patched_secrets.append((name, namespace, body))
+        return body
+
+    def delete_namespaced_secret(self, *, name, namespace):
+        self.deleted_secrets.append((name, namespace))
+        if self.delete_secret_exc:
+            raise self.delete_secret_exc
+        return None
+
+    def list_namespaced_secret(self, *, namespace, label_selector):
+        if self.list_secret_exc:
+            raise self.list_secret_exc
+        return SimpleNamespace(items=self.secrets_list)
 
     # --- create service ---
     def create_namespaced_service(self, *, namespace, body):
@@ -364,10 +397,15 @@ def test_submit_expose_ssh_forces_ssh_and_injects_node_port(monkeypatch, fake_cl
         command="python x.py",
         expose_ssh=True,
         ssh=False,
+        ssh_password="hunter2",
     )
     # expose_ssh implies ssh=True passed down to the manifest builder
     assert captured["ssh"] is True
     assert out["_ssh_node_port"] == 31555
+    # a Secret was created for the given password and its name was threaded
+    # into the manifest builder
+    assert captured["ssh_secret_name"] == "j1-ssh"
+    assert core.created_secrets[0][1]["metadata"]["name"] == "j1-ssh"
 
 
 def test_submit_without_expose_ssh_no_service(monkeypatch, fake_clients):
@@ -386,67 +424,57 @@ def test_submit_without_expose_ssh_no_service(monkeypatch, fake_clients):
 
 
 def _env_of(manifest):
-    """Extract the worker container's env as a name->value dict."""
+    """Extract the worker container's literal-value env as a name->value dict
+    (secretKeyRef-based entries like WUJI_SSH_PASSWORD have no "value" key and
+    are deliberately excluded — use _secret_ref_of for those)."""
     c = manifest["spec"]["tasks"][0]["template"]["spec"]["containers"][0]
-    return {e["name"]: e["value"] for e in c.get("env", [])}
+    return {e["name"]: e["value"] for e in c.get("env", []) if "value" in e}
 
 
-def test_submit_autogenerates_password_when_none_given(fake_clients):
-    # real build_volcano_job (not mocked) so we can inspect the manifest env
+def _secret_ref_of(manifest, var_name):
+    """secretKeyRef {name, key} for a given env var, or None if not secret-backed."""
+    c = manifest["spec"]["tasks"][0]["template"]["spec"]["containers"][0]
+    for e in c.get("env", []):
+        if e["name"] == var_name:
+            return e.get("valueFrom", {}).get("secretKeyRef")
+    return None
+
+
+def test_submit_ssh_without_password_raises(fake_clients):
+    # password-only login by design (punchlist) — submit() itself never prompts
+    # or invents a password (must stay safe to call from scripts); the CLI is
+    # responsible for resolving one (interactively) before calling this.
     core, custom = fake_clients
     custom.create_namespaced_custom_object = lambda **kw: dict(kw["body"])
-    out = sdk.submit(name="j", team="teamx", image="img", command="c", ssh=True)
-    gen = out.get("_ssh_generated_password")
-    assert gen  # non-empty
-    env = _env_of(out)
-    assert env["WUJI_SSH_PASSWORD"] == gen
-    assert env["WUJI_SSH_PASSWORD"] != ""
+    with pytest.raises(sdk.WujiError, match="密码"):
+        sdk.submit(name="j", team="teamx", image="img", command="c", ssh=True)
+    assert core.created_secrets == []  # nothing written before the raise
 
 
-def test_submit_expose_ssh_autogenerates_password(monkeypatch, fake_clients):
+def test_submit_expose_ssh_without_password_raises(fake_clients):
     core, custom = fake_clients
     custom.create_namespaced_custom_object = lambda **kw: dict(kw["body"])
-    monkeypatch.setattr(
-        sdk, "_create_ssh_service",
-        lambda name, *, ns, ssh_port, node_port, owner=None: 31000,
-    )
-    out = sdk.submit(
-        name="j", team="teamx", image="img", command="c", expose_ssh=True
-    )
-    assert out.get("_ssh_generated_password")
-    assert _env_of(out)["WUJI_SSH_PASSWORD"] == out["_ssh_generated_password"]
+    with pytest.raises(sdk.WujiError, match="密码"):
+        sdk.submit(name="j", team="teamx", image="img", command="c", expose_ssh=True)
 
 
-def test_submit_pubkey_does_not_autogenerate(fake_clients):
-    core, custom = fake_clients
-    custom.create_namespaced_custom_object = lambda **kw: dict(kw["body"])
-    out = sdk.submit(
-        name="j", team="teamx", image="img", command="c",
-        ssh=True, ssh_pubkey="ssh-rsa AAAAB3Nz user@host",
-    )
-    assert "_ssh_generated_password" not in out
-    env = _env_of(out)
-    assert env["WUJI_SSH_PUBKEY"] == "ssh-rsa AAAAB3Nz user@host"
-    assert env["WUJI_SSH_PASSWORD"] == ""  # pubkey-only: no password
-
-
-def test_submit_explicit_password_no_autogenerate(fake_clients):
+def test_submit_explicit_password_used(fake_clients):
     core, custom = fake_clients
     custom.create_namespaced_custom_object = lambda **kw: dict(kw["body"])
     out = sdk.submit(
         name="j", team="teamx", image="img", command="c",
         ssh=True, ssh_password="hunter2",
     )
-    assert "_ssh_generated_password" not in out
-    assert _env_of(out)["WUJI_SSH_PASSWORD"] == "hunter2"
+    assert _secret_ref_of(out, "WUJI_SSH_PASSWORD") == {"name": "j-ssh", "key": "password"}
+    assert core.created_secrets[0][1]["stringData"]["password"] == "hunter2"
 
 
-def test_submit_no_ssh_no_password_generated(fake_clients):
+def test_submit_no_ssh_no_password_needed(fake_clients):
     core, custom = fake_clients
     custom.create_namespaced_custom_object = lambda **kw: dict(kw["body"])
     out = sdk.submit(name="j", team="teamx", image="img", command="c")
-    assert "_ssh_generated_password" not in out
     assert _env_of(out) == {}  # no ssh -> no env
+    assert core.created_secrets == []  # no ssh -> no secret at all
 
 
 def test_submit_passes_node_port_through(monkeypatch, fake_clients):
@@ -469,8 +497,96 @@ def test_submit_passes_node_port_through(monkeypatch, fake_clients):
         expose_ssh=True,
         ssh_node_port=30777,
         ssh_port=2200,
+        ssh_password="hunter2",
     )
     assert seen == {"node_port": 30777, "ssh_port": 2200}
+
+
+# --------------------------------------------------------------------------- #
+# submit: SSH Secret lifecycle (creation, conflict-refresh, rollback, ownership)
+# --------------------------------------------------------------------------- #
+def test_submit_secret_body_structure(fake_clients):
+    core, custom = fake_clients
+    custom.create_namespaced_custom_object = lambda **kw: dict(kw["body"])
+    sdk.submit(
+        name="j", team="teamx", image="img", command="c",
+        ssh=True, ssh_password="hunter2",
+    )
+    ns, body = core.created_secrets[0]
+    assert ns == "teamx"
+    assert body["kind"] == "Secret"
+    assert body["metadata"]["name"] == "j-ssh"
+    assert body["metadata"]["namespace"] == "teamx"
+    assert body["metadata"]["labels"] == {
+        "app.kubernetes.io/managed-by": "wuji", "wuji.io/job": "j",
+    }
+    assert body["stringData"] == {"password": "hunter2"}
+
+
+def test_submit_secret_conflict_refreshes_existing(fake_clients):
+    core, custom = fake_clients
+    core.create_secret_exc = ApiException(status=409, reason="Conflict")
+    custom.create_namespaced_custom_object = lambda **kw: dict(kw["body"])
+    sdk.submit(
+        name="j", team="teamx", image="img", command="c",
+        ssh=True, ssh_password="newpw",
+    )
+    name, ns, body = core.patched_secrets[0]
+    assert name == "j-ssh" and ns == "teamx"
+    assert body["stringData"] == {"password": "newpw"}
+
+
+def test_submit_secret_create_error_wrapped(fake_clients):
+    core, custom = fake_clients
+    core.create_secret_exc = ApiException(status=403, reason="Forbidden")
+    with pytest.raises(sdk.WujiError):
+        sdk.submit(
+            name="j", team="teamx", image="img", command="c",
+            ssh=True, ssh_password="pw",
+        )
+
+
+def test_submit_secret_rolled_back_when_job_creation_fails(fake_clients):
+    core, custom = fake_clients
+
+    def boom(**kw):
+        raise ApiException(status=409, reason="Conflict")
+
+    custom.create_namespaced_custom_object = boom
+    with pytest.raises(sdk.WujiError):
+        sdk.submit(
+            name="j", team="teamx", image="img", command="c",
+            ssh=True, ssh_password="pw",
+        )
+    assert core.deleted_secrets == [("j-ssh", "teamx")]
+
+
+def test_submit_secret_owner_reference_patched_after_job_created(fake_clients):
+    core, custom = fake_clients
+    custom.create_namespaced_custom_object = (
+        lambda **kw: dict(kw["body"], metadata={**kw["body"]["metadata"], "uid": "jobuid1"})
+    )
+    sdk.submit(
+        name="j", team="teamx", image="img", command="c",
+        ssh=True, ssh_password="pw",
+    )
+    name, ns, body = core.patched_secrets[0]
+    assert name == "j-ssh" and ns == "teamx"
+    ref = body["metadata"]["ownerReferences"][0]
+    assert ref["kind"] == "Job" and ref["uid"] == "jobuid1" and ref["name"] == "j"
+
+
+def test_submit_secret_owner_patch_failure_is_tolerated(fake_clients):
+    core, custom = fake_clients
+    custom.create_namespaced_custom_object = (
+        lambda **kw: dict(kw["body"], metadata={**kw["body"]["metadata"], "uid": "jobuid1"})
+    )
+    core.patch_secret_exc = ApiException(status=403, reason="Forbidden")
+    # must not raise -- best-effort, kill() is the synchronous backstop
+    sdk.submit(
+        name="j", team="teamx", image="img", command="c",
+        ssh=True, ssh_password="pw",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -489,6 +605,29 @@ def test_kill_deletes_ssh_services_by_label(fake_clients):
     assert core.list_service_selector == "wuji.io/job=job1"
     deleted = {n for n, ns in core.deleted_services}
     assert deleted == {"job1-ssh", "job1-ssh-0", "job1-ssh-1"}
+
+
+def test_kill_deletes_ssh_secret_by_label(fake_clients):
+    core, custom = fake_clients
+    custom.delete_namespaced_custom_object = lambda **kw: None
+    core.secrets_list = [SimpleNamespace(metadata=SimpleNamespace(name="job1-ssh"))]
+    sdk.kill("job1", team="teamx")
+    assert core.deleted_secrets == [("job1-ssh", "teamx")]
+
+
+def test_kill_tolerates_secret_delete_error(fake_clients):
+    core, custom = fake_clients
+    custom.delete_namespaced_custom_object = lambda **kw: None
+    core.secrets_list = [SimpleNamespace(metadata=SimpleNamespace(name="job1-ssh"))]
+    core.delete_secret_exc = ApiException(status=404, reason="NotFound")
+    sdk.kill("job1", team="teamx")  # must not raise
+
+
+def test_kill_tolerates_secret_list_error(fake_clients):
+    core, custom = fake_clients
+    custom.delete_namespaced_custom_object = lambda **kw: None
+    core.list_secret_exc = ApiException(status=403, reason="Forbidden")
+    sdk.kill("job1", team="teamx")  # must not raise
 
 
 def test_kill_no_services_no_error(fake_clients):
@@ -551,7 +690,8 @@ def test_submit_expose_multinode_creates_worker_services(monkeypatch, fake_clien
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("single path must not run")),
     )
     out = sdk.submit(
-        name="j1", team="teamx", image="img", command="c", expose_ssh=True, nodes=2
+        name="j1", team="teamx", image="img", command="c", expose_ssh=True, nodes=2,
+        ssh_password="hunter2",
     )
     assert out["_ssh_worker_node_ports"] == {0: 30001, 1: 30002}
     assert "_ssh_node_port" not in out
@@ -573,7 +713,8 @@ def test_submit_expose_singlenode_uses_single_service(monkeypatch, fake_clients)
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("multi path must not run")),
     )
     out = sdk.submit(
-        name="j1", team="teamx", image="img", command="c", expose_ssh=True, nodes=1
+        name="j1", team="teamx", image="img", command="c", expose_ssh=True, nodes=1,
+        ssh_password="hunter2",
     )
     assert out["_ssh_node_port"] == 31000
     assert "_ssh_worker_node_ports" not in out

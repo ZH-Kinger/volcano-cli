@@ -20,10 +20,22 @@ the expose path in ``_submit_impl`` polls ``sdk.ssh_endpoint`` in a
 Only tests/ is touched — no source edits.
 """
 
+import pytest
+
 import volcano.cli as cli
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _no_interactive_password_prompt(monkeypatch):
+    # expose_ssh=True implies ssh -> without an explicit --ssh-password these
+    # tests would otherwise hit a real (blocking) getpass() call, since SSH is
+    # password-only with no local-key auto-detect (punchlist). Stub it so the
+    # existing tests (written before that change) keep exercising the same
+    # expose_ssh/submit-kwarg wiring without needing every call site touched.
+    monkeypatch.setattr(cli.getpass, "getpass", lambda *_a, **_k: "test-password")
 
 
 # --------------------------------------------------------------------------- #

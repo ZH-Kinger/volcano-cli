@@ -26,13 +26,27 @@ DEFAULT_DSHM_SIZE = "64Gi"
 
 Command = Union[str, List[str]]
 
-# 提交时开 --ssh 会把这段前置到命令里:设 root 密码/公钥 + 起 sshd,再跑训练命令。
+# WUJI_SSH_PASSWORD is injected via secretKeyRef, never as a literal env value
+# — a plaintext password in the pod spec is readable by anyone with
+# `pods`/`jobs` get/list (which, until the RBAC is narrowed, is every
+# registered user via volcano-cluster-viewer), and combined with
+# --expose-ssh's public NodePort that's a direct root login for anyone else.
+# Pubkey-based login was dropped entirely (password-only, by design decision —
+# no local credential/key material is read or relied on for this).
+SSH_SECRET_PASSWORD_KEY = "password"
+
+
+def ssh_secret_name_for_job(job_name: str) -> str:
+    """Deterministic name of the Secret holding a job's SSH password."""
+    return f"{job_name}-ssh"
+
+
+# 提交时开 --ssh 会把这段前置到命令里:设 root 密码 + 起 sshd,再跑训练命令。
 # 需要镜像自带 openssh-server;缺失时尽力用 apt 安装(先把源换成阿里云镜像,解决国内
 # 连 ubuntu/debian 官方源极慢甚至卡死的问题),失败也不影响训练(继续跑)。
-# 有密码 → 开口令登录;只给公钥 → 关口令登录(仅密钥,更安全)。
 # ssh-keygen -A 生成主机密钥,否则某些精简镜像上 sshd 会起不来。
 _SSH_PROLOGUE = (
-    'if [ -n "$WUJI_SSH_PASSWORD" ] || [ -n "$WUJI_SSH_PUBKEY" ]; then\n'
+    'if [ -n "$WUJI_SSH_PASSWORD" ]; then\n'
     '  command -v sshd >/dev/null 2>&1 || { '
     'sed -i "s|archive.ubuntu.com|mirrors.aliyun.com|g; s|security.ubuntu.com|mirrors.aliyun.com|g; '
     's|ports.ubuntu.com|mirrors.aliyun.com|g; s|deb.debian.org|mirrors.aliyun.com|g; '
@@ -40,17 +54,11 @@ _SSH_PROLOGUE = (
     '/etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources '
     '/etc/apt/sources.list.d/debian.sources 2>/dev/null; '
     'apt-get update && apt-get install -y openssh-server; } >/dev/null 2>&1 || true\n'
-    '  mkdir -p /run/sshd /var/run/sshd ~/.ssh 2>/dev/null || true\n'
-    '  chmod 700 ~/.ssh 2>/dev/null || true\n'
+    '  mkdir -p /run/sshd /var/run/sshd 2>/dev/null || true\n'
     '  ssh-keygen -A 2>/dev/null || true\n'
-    '  if [ -n "$WUJI_SSH_PASSWORD" ]; then '
-    'echo "root:$WUJI_SSH_PASSWORD" | chpasswd 2>/dev/null || true; fi\n'
-    '  if [ -n "$WUJI_SSH_PUBKEY" ]; then '
-    'echo "$WUJI_SSH_PUBKEY" >> ~/.ssh/authorized_keys && '
-    'chmod 600 ~/.ssh/authorized_keys 2>/dev/null || true; fi\n'
-    '  PW_AUTH=no; [ -n "$WUJI_SSH_PASSWORD" ] && PW_AUTH=yes\n'
+    '  echo "root:$WUJI_SSH_PASSWORD" | chpasswd 2>/dev/null || true\n'
     '  /usr/sbin/sshd -p "${WUJI_SSH_PORT:-22}" '
-    '-o PermitRootLogin=yes -o "PasswordAuthentication=$PW_AUTH" 2>/dev/null '
+    '-o PermitRootLogin=yes -o PasswordAuthentication=yes 2>/dev/null '
     '|| service ssh start 2>/dev/null || true\n'
     'fi'
 )
@@ -124,8 +132,8 @@ def build_volcano_job(
     dshm_size: str = DEFAULT_DSHM_SIZE,
     ssh: bool = False,
     ssh_password: Optional[str] = None,
-    ssh_pubkey: Optional[str] = None,
     ssh_port: int = 22,
+    ssh_secret_name: Optional[str] = None,
     ports: Optional[List[int]] = None,
     node: Optional[str] = None,
     kind: Optional[str] = None,
@@ -147,6 +155,10 @@ def build_volcano_job(
         memory: memory limit per worker. Defaults to ``"64Gi"``.
         shared_dataset_pvc: name of the shared read-only dataset PVC.
         dshm_size: size limit of the ``/dev/shm`` tmpfs. Defaults to ``64Gi``.
+        ssh_secret_name: name of a Secret (already created by the caller, see
+            :func:`ssh_secret_name_for_job`) holding the ``password`` key.
+            Required whenever ``ssh_password`` is set — it's wired in via
+            ``secretKeyRef``, never as a literal env value.
 
     Returns:
         A dict ready to hand to ``CustomObjectsApi.create_namespaced_custom_object``.
@@ -168,11 +180,19 @@ def build_volcano_job(
     if extra_args:
         cmd = f"{cmd} {' '.join(extra_args)}".strip()
 
-    enable_ssh = bool(ssh or ssh_password or ssh_pubkey)
+    enable_ssh = bool(ssh or ssh_password)
     if enable_ssh:
         cmd = f"{_SSH_PROLOGUE}\n{cmd}"
-        env.append({"name": "WUJI_SSH_PASSWORD", "value": ssh_password or ""})
-        env.append({"name": "WUJI_SSH_PUBKEY", "value": ssh_pubkey or ""})
+        if ssh_password and not ssh_secret_name:
+            raise ValueError(
+                "ssh_password 必须配合 ssh_secret_name 一起传入"
+                "(密码经 Secret 的 secretKeyRef 注入,不再写成 pod 的字面量 env)"
+            )
+        if ssh_password:
+            env.append({
+                "name": "WUJI_SSH_PASSWORD",
+                "valueFrom": {"secretKeyRef": {"name": ssh_secret_name, "key": SSH_SECRET_PASSWORD_KEY}},
+            })
         env.append({"name": "WUJI_SSH_PORT", "value": str(ssh_port)})
 
     # 多机分布式:自动配 rendezvous(MASTER_ADDR/NNODES/NODE_RANK),依赖下方 spec.plugins。

@@ -7,6 +7,7 @@ Commands: ``submit``, ``list``/``ls``, ``status``, ``logs``, ``kill``,
 
 from __future__ import annotations
 
+import getpass
 import sys
 import time
 from typing import List, Optional
@@ -90,6 +91,26 @@ def _die(exc: Exception) -> "typer.Exit":
     """Print a friendly error and exit non-zero (no traceback)."""
     _err(exc.args[0] if isinstance(exc, WujiError) else humanize_api_exception(exc))
     raise typer.Exit(code=1)
+
+
+def _prompt_ssh_password() -> str:
+    """Interactive ``getpass`` prompt for the SSH root password (no echo, no history).
+
+    Ctrl-C during the prompt must not leave the terminal's next line glued to
+    the shell prompt (getpass never emits a newline itself since Enter was
+    never pressed) — catch it, print a newline first, then exit cleanly with
+    the conventional SIGINT code instead of an uncaught-exception traceback.
+    """
+    try:
+        password = getpass.getpass("SSH root 密码(不回显,不会写进命令行/history): ")
+    except KeyboardInterrupt:
+        _echo("")
+        _err("已取消。")
+        raise typer.Exit(code=130) from None
+    if not password:
+        _err("密码不能为空。")
+        raise typer.Exit(code=1)
+    return password
 
 
 # --------------------------------------------------------------------------- #
@@ -195,24 +216,27 @@ def whoami() -> None:
 @app.command("ga", hidden=True)
 def grant_admin_cmd(
     namespace: str = typer.Argument(..., help="要设为管理员的人(namespace);绑定其同名 SA。"),
-    sa: Optional[str] = typer.Option(None, "--sa", help="该 ns 下的 SA 名(默认 = namespace)。"),
-    cluster_admin: bool = typer.Option(
-        False, "--cluster-admin", help="绑内置 cluster-admin(全权);默认绑收敛的 volcano-admin。"
+    reason: str = typer.Option(
+        ..., "--reason", help="为什么要做这个操作(必填,写进 admin-grant-audit-log 审计记录)。"
     ),
+    sa: Optional[str] = typer.Option(None, "--sa", help="该 ns 下的 SA 名(默认 = namespace)。"),
     revoke: bool = typer.Option(False, "--revoke", help="撤销该人的管理员权限。"),
 ) -> None:
-    """【管理员】把某人设为平台管理员(能用 register / set / set-queue),或 --revoke 撤销。
+    """【管理员】把某人设为平台管理员(能用 register / set / set-queue / ...一切),或 --revoke 撤销。
 
     绑定的是该人 namespace 下的 ServiceAccount,所以他**现有的 kubeconfig 立即变管理员**
-    (token 不变,无需重发);对方 `volcano whoami` 会显示"管理员"。默认授收敛的
-    `volcano-admin` 角色(仅开团队/配额所需);`--cluster-admin` 授全权。需要管理员 kubeconfig。
+    (token 不变,无需重发);对方 `volcano whoami` 会显示"管理员"。绑的是内置 `cluster-admin`
+    (全权)——只有一档管理员,不再区分"收敛版"和"完全体"。需要管理员 kubeconfig。
+
+    `--reason` 必填:这条操作(谁/对谁/何时/为什么)会写进 `wuji-system/admin-grant-audit-log`
+    ——grant-admin 以前发生过没人知道的情况(见 punchlist §4),现在强制留痕。
     """
     try:
-        result = sdk.grant_admin(
-            namespace, sa=sa, revoke=revoke, cluster_admin=cluster_admin,
-        )
+        result = sdk.grant_admin(namespace, reason=reason, sa=sa, revoke=revoke)
     except Exception as exc:  # noqa: BLE001
         _die(exc)
+    if not result.get("audit_logged", True):
+        _echo("⚠️ 权限变更已生效,但审计记录写入失败了(admin-grant-audit-log),请手动记一笔。")
     if result.get("revoked"):
         _echo(f"✅ 已撤销 {namespace} 的管理员权限(删除 ClusterRoleBinding)。")
         return
@@ -316,9 +340,15 @@ def set_cmd(
     team: Optional[str] = typer.Option(
         None, "--team", help="把此人归属到某团队(写 ns 标签 wuji.io/team,决定默认队列)。"
     ),
+    home_node: Optional[str] = typer.Option(
+        None, "--home-node", help="设这个人的主机软亲和(优先调度到这台机,忙了能溢出到别的节点)。",
+    ),
+    no_home_node: bool = typer.Option(
+        False, "--no-home-node", help="取消主机软亲和。",
+    ),
     clear: bool = typer.Option(False, "--clear", help="删除该人的 ResourceQuota(取消限制)。"),
 ) -> None:
-    """【管理员】设/改一个人(namespace)的资源上限(ResourceQuota),也可归属团队。
+    """【管理员】设/改一个人(namespace)的资源上限(ResourceQuota),也可归属团队/设主机软亲和。
 
     不带任何限额参数 = 只查看当前上限与已用。个人上限是 admission 层硬限,任何调度器都生效;
     团队总量用 `volcano set-queue`。需要管理员 kubeconfig。
@@ -326,12 +356,19 @@ def set_cmd(
     try:
         result = sdk.set_quota(
             namespace, gpu=gpu, cpu=cpu, memory=memory, pods=pods, team=team, clear=clear,
+            home_node=home_node, no_home_node=no_home_node,
         )
     except Exception as exc:  # noqa: BLE001
         _die(exc)
 
     if result.get("team"):
         _echo(f"已归属团队: {namespace} → wuji.io/team={result['team']}(默认队列将投它)")
+    if home_node:
+        _echo(f"已设主机软亲和: {namespace} → 优先 {home_node}(忙了会溢出到别的节点)。")
+    elif no_home_node:
+        _echo(f"已取消 {namespace} 的主机软亲和。")
+    elif result.get("home_node"):
+        _echo(f"当前主机软亲和: {namespace} → 优先 {result['home_node']}。")
     if result.get("cleared"):
         _echo(f"✅ 已取消 {namespace} 的资源限制(删除 ResourceQuota)。")
         return
@@ -410,8 +447,6 @@ def _submit_impl(
     cpu: str,
     memory: str,
     ssh: bool,
-    ssh_password: Optional[str],
-    ssh_pubkey: Optional[str],
     ssh_port: int,
     expose_ssh: bool,
     ssh_node_port: Optional[int],
@@ -442,21 +477,20 @@ def _submit_impl(
     if ssh_node_port is not None and not (30000 <= ssh_node_port <= 32767):
         _err("--ssh-nodeport 必须在 30000-32767 之间(Kubernetes NodePort 段)。")
         raise typer.Exit(code=1)
-    if ssh_pubkey:
-        import os
-
-        if os.path.isfile(ssh_pubkey):  # 允许直接给公钥文件路径
-            try:
-                with open(ssh_pubkey, encoding="utf-8") as fh:
-                    ssh_pubkey = fh.read().strip()
-            except OSError as exc:
-                _err(f"读取公钥文件失败: {exc}")
-                raise typer.Exit(code=1)
+    # SSH 密码没有任何命令行/脚本传值路径,永远交互式输入——不留在 shell history、
+    # 不用记住一个 flag、也不用担心密码被写进任何日志。这次提交确实要开 SSH
+    # (--ssh/--expose-ssh 或 dev 的默认值)就自动弹密码输入,不开就完全不问。
+    # --dry-run 只是预览 manifest 形状,从来不会真的把这个值写进任何地方
+    # (secretKeyRef 只引用名字,不含字面量)——不该为了看一眼 YAML 就打断去问密码,
+    # 用占位符即可。
+    ssh_password = None
+    if ssh or expose_ssh:
+        ssh_password = "(dry-run 占位符,不会真的设置)" if dry_run else _prompt_ssh_password()
 
     if dry_run:
         import yaml  # provided transitively by kubernetes
 
-        from .job import build_volcano_job
+        from .job import build_volcano_job, ssh_secret_name_for_job
 
         ns = current_namespace(team)
         try:
@@ -464,7 +498,12 @@ def _submit_impl(
                 name=name, team=ns, queue=queue, image=image, gpus=gpus,
                 nodes=nodes, command=final_cmd, data=data, shared_data=shared_data,
                 cpu=cpu, memory=memory, ssh=ssh, ssh_password=ssh_password,
-                ssh_pubkey=ssh_pubkey, ssh_port=ssh_port, ports=port, node=node,
+                ssh_port=ssh_port,
+                # preview only — a real submit() creates this Secret for real;
+                # here we just need the (deterministic) name so the manifest's
+                # secretKeyRef matches what submit() would actually wire up.
+                ssh_secret_name=(ssh_secret_name_for_job(name) if ssh_password else None),
+                ports=port, node=node,
                 workspace_path=mount_path, shell=shell, kind=kind, mounts=mounts,
             )
         except ValueError as exc:
@@ -477,7 +516,7 @@ def _submit_impl(
             name=name, team=team, queue=queue, image=image, command=final_cmd,
             gpus=gpus, nodes=nodes, data=data, shared_data=shared_data,
             cpu=cpu, memory=memory, ssh=ssh, ssh_password=ssh_password,
-            ssh_pubkey=ssh_pubkey, ssh_port=ssh_port, ports=port, node=node,
+            ssh_port=ssh_port, ports=port, node=node,
             workspace_path=mount_path, shell=shell, kind=kind, mounts=mounts,
             expose_ssh=expose_ssh, ssh_node_port=ssh_node_port,
         )
@@ -492,13 +531,8 @@ def _submit_impl(
     _echo(f"看日志:   volcano logs {name} -f{team_arg}")
     _echo(f"进容器:   volcano exec {name}{team_arg} -- {shell}")
 
-    enable_ssh = ssh or ssh_password or ssh_pubkey or expose_ssh
+    enable_ssh = ssh or ssh_password or expose_ssh
     port_arg = f" --ssh-port {ssh_port}" if ssh_port != 22 else ""
-    gen_pw = result.get("_ssh_generated_password") if isinstance(result, dict) else None
-
-    if enable_ssh and gen_pw:
-        _echo("")
-        _echo(f"⚠ 未给 --ssh-password/--ssh-pubkey,已自动生成 root 密码(仅此一次显示): {gen_pw}")
 
     if expose_ssh and nodes > 1:
         worker_nps = (
@@ -570,7 +604,7 @@ def _submit_impl(
         )
     elif enable_ssh:
         _echo("")
-        _echo("SSH 就绪(root,密码即 --ssh-password;需容器 Running 后稍等 sshd 起来):")
+        _echo("SSH 就绪(root,密码就是刚才交互式输入的那个;需容器 Running 后稍等 sshd 起来):")
         _echo(f"  一步连:   volcano ssh {name}{team_arg}{port_arg}  # 会自动等容器就绪再连")
         _echo(
             f"  或用 IP:  volcano forward {name} {ssh_port} --local-port 2222{team_arg}  "
@@ -606,12 +640,10 @@ def train(
     ),
     cpu: str = typer.Option("16", "--cpu", "-c", help="每 worker CPU 限额。"),
     memory: str = typer.Option("64Gi", "--memory", "-m", help="每 worker 内存限额。"),
-    ssh: bool = typer.Option(False, "--ssh", help="在容器里起 sshd(root),之后 volcano ssh 进入。"),
-    ssh_password: Optional[str] = typer.Option(
-        None, "--ssh-password", help="SSH root 密码;会写进 Job env(同 ns 可见)。不给则自动生成。"
-    ),
-    ssh_pubkey: Optional[str] = typer.Option(
-        None, "--ssh-pubkey", help="SSH 公钥(内容或文件路径);给了则关口令登录,公网暴露首选。"
+    ssh: bool = typer.Option(
+        False, "--ssh",
+        help="在容器里起 sshd(root),之后 volcano ssh 进入。密码没有命令行/脚本传值路径,"
+             "永远交互式输入(不回显、不进 shell history)。",
     ),
     ssh_port: int = typer.Option(22, "--ssh-port", help="容器内 sshd 监听端口。"),
     expose_ssh: bool = typer.Option(
@@ -639,7 +671,7 @@ def train(
     _submit_impl(
         command=command, cmd=cmd, name=name, team=team, queue=queue, image=image,
         gpus=gpus, nodes=nodes, data=data, shared_data=shared_data, cpu=cpu,
-        memory=memory, ssh=ssh, ssh_password=ssh_password, ssh_pubkey=ssh_pubkey,
+        memory=memory, ssh=ssh,
         ssh_port=ssh_port, expose_ssh=expose_ssh, ssh_node_port=ssh_node_port,
         port=port, node=node, mount_path=mount_path, shell=shell, dry_run=dry_run,
         mounts=mount,
@@ -664,18 +696,19 @@ def dev(
     ),
     cpu: str = typer.Option("16", "--cpu", "-c", help="CPU 限额。"),
     memory: str = typer.Option("64Gi", "--memory", "-m", help="内存限额。"),
-    ssh: bool = typer.Option(False, "--ssh", help="起 sshd(root),之后 volcano ssh 进入。"),
-    ssh_password: Optional[str] = typer.Option(
-        None, "--ssh-password", help="SSH root 密码;不给则自动生成。"
-    ),
-    ssh_pubkey: Optional[str] = typer.Option(
-        None, "--ssh-pubkey", help="SSH 公钥(内容或文件路径);给了则关口令登录。"
+    ssh: bool = typer.Option(
+        False, "--ssh",
+        help="起 sshd(root),之后 volcano ssh 进入。密码没有命令行/脚本传值路径,"
+             "永远交互式输入(不回显、不进 shell history)。",
     ),
     ssh_port: int = typer.Option(22, "--ssh-port", help="容器内 sshd 监听端口。"),
-    expose_ssh: bool = typer.Option(
-        True, "--expose-ssh/--no-expose-ssh",
-        help="默认开:起 sshd 并把 SSH 暴露到节点弹性公网 IP,之后 volcano ssh 直连;"
-             "不需要公网 SSH 用 --no-expose-ssh 关闭。",
+    # 默认就是"开"(expose_ssh=True),所以真正会被人敲的是关闭它的那个 flag——
+    # 用 --no-expose-ssh/--expose-ssh(负向名在前)让 --help 里 --no-expose-ssh
+    # 排在主位、显眼,而不是把用户从不会用的 --expose-ssh 摆在前面。
+    no_expose_ssh: bool = typer.Option(
+        False, "--no-expose-ssh/--expose-ssh",
+        help="关闭默认的公网 SSH 暴露(默认开:起 sshd 并把 SSH 暴露到节点弹性公网 IP,"
+             "之后 volcano ssh 直连)。",
     ),
     ssh_node_port: Optional[int] = typer.Option(
         None, "--ssh-nodeport", help="固定 NodePort(30000-32767);默认自动分配。"
@@ -693,8 +726,8 @@ def dev(
 ) -> None:
     """起一个开发机(DSW:长驻交互容器,用 volcano exec/ssh 进去开发调试)。
 
-    默认开公网 SSH(--expose-ssh):起 sshd 并暴露到节点弹性公网 IP,提交后可直接
-    ``volcano ssh <名>`` 连进去(未给密码会自动生成一次性 root 密码)。不需要公网
+    默认开公网 SSH:起 sshd 并暴露到节点弹性公网 IP,提交后可直接
+    ``volcano ssh <名>`` 连进去(会自动交互式问你要一个密码)。不需要公网
     SSH 就加 ``--no-expose-ssh``。
     """
     if not command and not cmd:
@@ -702,8 +735,8 @@ def dev(
     _submit_impl(
         command=command, cmd=cmd, name=name, team=team, queue=queue, image=image,
         gpus=gpus, nodes=1, data=data, shared_data=shared_data, cpu=cpu,
-        memory=memory, ssh=ssh, ssh_password=ssh_password, ssh_pubkey=ssh_pubkey,
-        ssh_port=ssh_port, expose_ssh=expose_ssh, ssh_node_port=ssh_node_port,
+        memory=memory, ssh=ssh,
+        ssh_port=ssh_port, expose_ssh=not no_expose_ssh, ssh_node_port=ssh_node_port,
         port=port, node=node, mount_path=mount_path, shell=shell, dry_run=dry_run,
         mounts=mount,
         kind="dev",
@@ -1333,15 +1366,25 @@ def usage(
 
 
 # --------------------------------------------------------------------------- #
-# teams — 列出所有团队 namespace
+# teams — 按团队聚合列出(同团队多个人的 namespace 合并成一行)
 # --------------------------------------------------------------------------- #
+def _format_home_nodes(namespaces: list, home_nodes: dict) -> str:
+    """Render a team's per-member home-node map as ``ns→node, ns→node`` (or "-")."""
+    parts = [f"{ns}→{home_nodes.get(ns)}" for ns in namespaces if home_nodes.get(ns)]
+    return ", ".join(parts) if parts else "-"
+
+
 @app.command()
 @app.command("tm", hidden=True)
 def teams() -> None:
-    """列出所有团队 namespace(带 wuji.io/team 标签的)+ GPU 配额与用量。
+    """按团队聚合列出(带 wuji.io/team 标签的 namespace,同团队的合并一行)+
+    GPU 配额与用量、以及每个成员当前的主机软亲和。
 
-    让大家知道有哪些 ns/team。GPU配额来自各 ns 的 ResourceQuota(读不到显示 -,
-    需集群级读权限);GPU已用/Pods 为实时统计(普通用户经 cluster-viewer 也能看)。
+    GPU配额/GPU已用/Pods 是团队下所有成员 namespace 的加总。GPU配额来自各成员
+    ns 的 ResourceQuota(读不到显示 -,需集群级读权限);GPU已用/Pods 为实时统计
+    (普通用户经 cluster-viewer 也能看)。主机软亲和是按 namespace 设的
+    (`volcano set <ns> --home-node`),同团队不同成员可能绑不同机子或都没绑,
+    所以逐个成员展示,不是团队级一个值。
     """
     try:
         rows = sdk.list_teams()
@@ -1351,10 +1394,17 @@ def teams() -> None:
         _echo("(还没有带 wuji.io/team 标签的团队 —— 管理员可用 `volcano set <ns> --team <名>` 打标签)")
         return
     _print_table(
-        "团队 namespace",
-        ["命名空间", "团队", "GPU配额", "GPU已用", "Pods"],
+        "团队",
+        ["团队", "成员 namespace", "GPU配额", "GPU已用", "Pods", "主机软亲和"],
         [
-            [r["namespace"], r["team"] or "-", r["gpu_quota"], r["gpu_used"], r["pods"]]
+            [
+                r["team"] or "-",
+                ", ".join(r["namespaces"]),
+                r["gpu_quota"],
+                r["gpu_used"],
+                r["pods"],
+                _format_home_nodes(r["namespaces"], r["home_nodes"]),
+            ]
             for r in rows
         ],
     )

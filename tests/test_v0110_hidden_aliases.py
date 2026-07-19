@@ -256,7 +256,7 @@ _EQUIV_CASES = {
     "ga": {  # grant-admin
         "sdk": "grant_admin",
         "ret": {"sa": "alice", "role": "volcano-admin"},
-        "args": ["alice"],
+        "args": ["alice", "--reason", "onboarding"],
         "expect": "管理员",
     },
     "sq": {  # set-queue, view mode (no change flags)
