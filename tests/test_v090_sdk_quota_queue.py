@@ -2,8 +2,11 @@
 
 Covers the new ``volcano.sdk`` surface, fully mocked (no real cluster / kubeconfig):
 
-* ``resolve_default_queue`` — reads the ns ``wuji.io/team`` label; NEVER raises
-  (any failure → ``"default"``) so it can't block ``submit``.
+* ``resolve_default_queue`` — reads the ns ``wuji.io/team`` label; fail-closed,
+  no ``"default"`` fallback — no label, an unreadable namespace, a labelled
+  team with no matching Queue, or any other lookup failure all raise
+  ``WujiError`` instead of silently routing into the wide-open ``default``
+  Queue (that used to let a submission duck team-level GPU accounting).
 * ``get_quota`` / ``set_quota`` — per-person ResourceQuota ``gpu-quota``
   (admin-gated, create-then-patch upsert, clear, team-label write, report-only).
 * ``get_queue_one`` / ``set_queue`` — per-team Volcano Queue upsert/delete
@@ -66,7 +69,7 @@ def _client(*, core=None, custom=None, auth=None):
 
 
 # =========================================================================== #
-# resolve_default_queue — reads the ns team label; NEVER raises
+# resolve_default_queue — reads the ns team label; fail-closed, no default fallback
 # =========================================================================== #
 class _NsCore:
     def __init__(self, labels=None, exc=None):
@@ -129,66 +132,74 @@ def test_resolve_default_queue_team_arg_threaded(monkeypatch):
     assert custom.gets[0]["name"] == "blueteam"
 
 
-def test_resolve_default_queue_labelled_but_queue_absent_is_default(monkeypatch):
-    # label=team but NO such Queue (get 404) -> fall back to "default" so a submit
-    # is never routed to a non-existent queue (which Volcano would reject).
+def test_resolve_default_queue_labelled_but_queue_absent_raises(monkeypatch):
+    # label=team but NO such Queue (get 404) -> raise, never silently "default".
     core = _NsCore(labels={TEAM_LABEL: "orphanteam"})
     custom = _QueueGetCustom(exc=ApiException(status=404))
     _wire_resolve(monkeypatch, core, custom=custom)
-    assert sdk.resolve_default_queue() == "default"
+    with pytest.raises(WujiError, match="orphanteam"):
+        sdk.resolve_default_queue()
     assert custom.gets[0]["name"] == "orphanteam"  # it did try to validate
 
 
-def test_resolve_default_queue_queue_get_non404_is_default(monkeypatch):
-    # any ApiException from the queue get (e.g. 403/500) -> "default", not a raise.
+def test_resolve_default_queue_queue_get_non404_raises(monkeypatch):
+    # any other ApiException from the queue get (e.g. 403/500) -> raise too.
     core = _NsCore(labels={TEAM_LABEL: "redteam"})
     custom = _QueueGetCustom(exc=ApiException(status=500))
     _wire_resolve(monkeypatch, core, custom=custom)
-    assert sdk.resolve_default_queue() == "default"
+    with pytest.raises(WujiError):
+        sdk.resolve_default_queue()
 
 
-def test_resolve_default_queue_label_default_skips_queue_get(monkeypatch):
-    # label literally "default" -> "default" WITHOUT a queue-existence probe.
+def test_resolve_default_queue_label_literally_default_still_probes(monkeypatch):
+    # label == "default" is just a regular team name now — no special-cased skip;
+    # it's validated like any other team and routes there if the Queue exists.
     core = _NsCore(labels={TEAM_LABEL: "default"})
-    custom = _QueueGetCustom(exc=AssertionError("must not probe queue for 'default'"))
+    custom = _QueueGetCustom(exists=True)
     _wire_resolve(monkeypatch, core, custom=custom)
     assert sdk.resolve_default_queue() == "default"
-    assert custom.gets == []  # never consulted the queue API
+    assert custom.gets[0]["name"] == "default"  # did consult the queue API
 
 
-def test_resolve_default_queue_no_label_is_default(monkeypatch):
+def test_resolve_default_queue_no_label_raises(monkeypatch):
     _wire_resolve(monkeypatch, _NsCore(labels={"unrelated": "y"}))
-    assert sdk.resolve_default_queue() == "default"
+    with pytest.raises(WujiError, match="wuji.io/team"):
+        sdk.resolve_default_queue()
 
 
-def test_resolve_default_queue_empty_labels_is_default(monkeypatch):
+def test_resolve_default_queue_empty_labels_raises(monkeypatch):
     _wire_resolve(monkeypatch, _NsCore(labels={}))
-    assert sdk.resolve_default_queue() == "default"
+    with pytest.raises(WujiError):
+        sdk.resolve_default_queue()
 
 
-def test_resolve_default_queue_none_labels_is_default(monkeypatch):
+def test_resolve_default_queue_none_labels_raises(monkeypatch):
     # metadata.labels is None for a ns with no labels at all.
     _wire_resolve(monkeypatch, _NsCore(labels=None))
-    assert sdk.resolve_default_queue() == "default"
+    with pytest.raises(WujiError):
+        sdk.resolve_default_queue()
 
 
-def test_resolve_default_queue_read_apiexception_is_default(monkeypatch):
+def test_resolve_default_queue_read_apiexception_raises(monkeypatch):
     _wire_resolve(monkeypatch, _NsCore(exc=ApiException(status=403)))
-    assert sdk.resolve_default_queue() == "default"
+    with pytest.raises(WujiError):
+        sdk.resolve_default_queue()
 
 
-def test_resolve_default_queue_load_clients_raises_is_default(monkeypatch):
+def test_resolve_default_queue_load_clients_raises_propagates(monkeypatch):
     monkeypatch.setattr(sdk, "current_namespace", lambda team=None: "carol")
     monkeypatch.setattr(
         sdk, "load_clients",
         lambda: (_ for _ in ()).throw(WujiError("no kubeconfig")),
     )
-    assert sdk.resolve_default_queue() == "default"
+    with pytest.raises(WujiError, match="no kubeconfig"):
+        sdk.resolve_default_queue()
 
 
-def test_resolve_default_queue_current_namespace_raises_is_default(monkeypatch):
-    # current_namespace can raise WujiError (admin with no default ns) — must not
-    # propagate out of resolve_default_queue (would block submit otherwise).
+def test_resolve_default_queue_current_namespace_raises_propagates(monkeypatch):
+    # current_namespace can raise WujiError (admin with no default ns) — this now
+    # propagates directly (no swallow-to-"default") since it blocks submit anyway
+    # once there's no team to resolve.
     monkeypatch.setattr(
         sdk, "current_namespace",
         lambda team=None: (_ for _ in ()).throw(WujiError("无法确定团队 namespace")),
@@ -197,7 +208,8 @@ def test_resolve_default_queue_current_namespace_raises_is_default(monkeypatch):
         sdk, "load_clients",
         lambda: (_ for _ in ()).throw(AssertionError("load_clients must not run")),
     )
-    assert sdk.resolve_default_queue() == "default"
+    with pytest.raises(WujiError, match="无法确定团队 namespace"):
+        sdk.resolve_default_queue()
 
 
 # =========================================================================== #

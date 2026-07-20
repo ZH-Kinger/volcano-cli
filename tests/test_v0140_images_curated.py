@@ -301,7 +301,7 @@ def test_version_matches_package_dunder():
     result = runner.invoke(cli.app, ["--version"])
     assert result.exit_code == 0, result.output
     assert f"volcano {volcano.__version__}" in result.output
-    assert volcano.__version__ == "0.15.0"
+    assert volcano.__version__ == "0.16.0"
 
 
 def test_no_args_still_shows_help_after_root_callback():

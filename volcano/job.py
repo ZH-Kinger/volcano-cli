@@ -21,7 +21,7 @@ WORKSPACE_MOUNT = "/workspace"
 DATASETS_MOUNT = "/datasets"
 DSHM_MOUNT = "/dev/shm"
 
-DEFAULT_SHARED_DATASET_PVC = "shared-datasets"
+DEFAULT_SHARED_DATASET_PVC = "shared-nas"
 DEFAULT_DSHM_SIZE = "64Gi"
 
 Command = Union[str, List[str]]

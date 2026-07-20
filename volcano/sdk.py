@@ -67,7 +67,7 @@ def submit(
     memory: str = "64Gi",
     shell: str = "bash",
     workspace_path: str = "/workspace",
-    shared_dataset_pvc: str = "shared-datasets",
+    shared_dataset_pvc: str = "shared-nas",
     ssh: bool = False,
     ssh_password: Optional[str] = None,
     ssh_port: int = 22,
@@ -1715,30 +1715,44 @@ def resolve_default_queue(team: Optional[str] = None) -> str:
     """Resolve the queue a submission should default to = the person's team.
 
     Reads the ``wuji.io/team`` label on the current namespace and uses it as the
-    queue — **but only if a Queue by that name actually exists**; otherwise (or if
-    the label is absent / the namespace can't be read) falls back to ``"default"``.
-    Validating existence means labelling a namespace with a team that has no
-    dedicated queue (e.g. under the single-``default``-queue model) never routes a
-    submit to a non-existent queue (which Volcano would reject).
+    queue — **no ``"default"`` fallback**. A namespace with no team label, or
+    whose labelled team has no matching Queue, raises instead of silently
+    routing into the wide-open ``default`` Queue: that used to make it trivial
+    to duck team-level GPU accounting (submit with no team label, or even with
+    one, and land in a Queue with its own full deserved/capability, untracked
+    against any team). Gatekeeper's ``volcano-queue-team-match`` constraint now
+    also denies any queue other than the submitter's own team at admission time
+    (no more blanket ``"default"`` allowance there either) — this mirrors the
+    same fail-closed rule at the CLI's UX layer, so the error surfaces here
+    with a clear fix instead of as a raw admission-webhook rejection.
     """
+    ns = current_namespace(team)
+    core, _, custom = load_clients()
     try:
-        ns = current_namespace(team)
-        core, _, custom = load_clients()
         obj = core.read_namespace(name=ns)
-        labels = (obj.metadata.labels or {}) if obj.metadata else {}
-        q = labels.get(TEAM_LABEL)
-        if not q or q == "default":
-            return "default"
-        try:
-            custom.get_cluster_custom_object(
-                group=VOLCANO_QUEUE_GROUP, version=VOLCANO_QUEUE_VERSION,
-                plural=VOLCANO_QUEUE_PLURAL, name=q,
-            )
-            return q  # queue exists → route there
-        except ApiException:
-            return "default"  # labelled queue doesn't exist → don't break submit
-    except Exception:  # noqa: BLE001 - never block submit on queue resolution
-        return "default"
+    except ApiException as exc:
+        raise WujiError(humanize_api_exception(exc)) from exc
+    labels = (obj.metadata.labels or {}) if obj.metadata else {}
+    q = labels.get(TEAM_LABEL)
+    if not q:
+        raise WujiError(
+            f"namespace {ns} 没打 wuji.io/team 标签,无法确定投递到哪个队列,"
+            f"也不会回退到 default(那会绕过团队级 GPU 配额记账):"
+            f"请管理员先 `volcano set {ns} --team <团队名>`。"
+        )
+    try:
+        custom.get_cluster_custom_object(
+            group=VOLCANO_QUEUE_GROUP, version=VOLCANO_QUEUE_VERSION,
+            plural=VOLCANO_QUEUE_PLURAL, name=q,
+        )
+    except ApiException as exc:
+        if exc.status == 404:
+            raise WujiError(
+                f"namespace {ns} 标的团队是 {q!r},但没有同名的 Volcano Queue:"
+                f"请管理员先 `volcano set-queue {q} --deserved N --cap N`。"
+            ) from None
+        raise WujiError(humanize_api_exception(exc)) from exc
+    return q
 
 
 def _quota_hard(gpu, cpu, memory, pods) -> Dict[str, str]:
@@ -2312,9 +2326,12 @@ def list_teams() -> List[Dict[str, Any]]:
 
     Per team returns ``{team, namespaces, gpu_quota, gpu_used, pods, home_nodes}``:
       - ``namespaces``: sorted member namespace names.
-      - ``gpu_quota``: sum of each member's ``gpu-quota`` ResourceQuota GPU hard
-        limit ("-" if no member has a readable numeric quota — quota read is
-        cluster-wide, admin-only).
+      - ``gpu_quota``: the team's Volcano Queue ``deserved`` GPU count (the
+        guaranteed floor — see ``set_queue``); "-" for untagged/single-person
+        groups (no queue) or if the Queue can't be read (cluster-scoped read,
+        admin-only). This is a team-level value, not a per-member sum — GPU
+        quota moved from per-namespace ResourceQuota to per-team Queue
+        deserved/capability, so there's exactly one number per team now.
       - ``gpu_used``/``pods``: summed live GPU/pod count across members (from
         pods, which the shared cluster-viewer role can read, so ordinary users
         see this too).
@@ -2343,16 +2360,6 @@ def list_teams() -> List[Dict[str, Any]]:
     except Exception:  # noqa: BLE001 - usage is best-effort
         pass
 
-    quota: Dict[str, str] = {}
-    try:
-        rqs = core.list_resource_quota_for_all_namespaces()
-        for r in rqs.items:
-            if r.metadata.name == _QUOTA_NAME:
-                hard = (r.spec.hard or {}) if r.spec else {}
-                quota[r.metadata.namespace] = hard.get("requests.nvidia.com/gpu", "-")
-    except ApiException:
-        pass  # not permitted to list quotas cluster-wide → leave "-"
-
     groups: Dict[str, List[str]] = {}
     for ns in nss.items:
         name = ns.metadata.name
@@ -2369,13 +2376,14 @@ def list_teams() -> List[Dict[str, Any]]:
         gpu_used = sum(int(used.get(m, {}).get("gpu", 0)) for m in members)
         pods = sum(int(used.get(m, {}).get("pods", 0)) for m in members)
 
-        numeric_quotas = []
-        for m in members:
+        gpu_quota = "-"
+        if team:
             try:
-                numeric_quotas.append(int(quota.get(m, "-")))
-            except (TypeError, ValueError):
+                q = get_queue_one(team)
+                if q is not None:
+                    gpu_quota = str(q["deserved"])
+            except Exception:  # noqa: BLE001 - degrade to "-" on any read failure
                 pass
-        gpu_quota = str(sum(numeric_quotas)) if numeric_quotas else "-"
 
         home_nodes: Dict[str, Optional[str]] = {}
         for m in members:

@@ -144,7 +144,7 @@ def test_data_ls_shared_uses_datasets_mount(monkeypatch):
     assert result.exit_code == 0, result.output
     container = core.created["body"]["spec"]["containers"][0]
     assert "/datasets" in container["command"][-1]
-    assert core.created["body"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == "shared-datasets"
+    assert core.created["body"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == "shared-nas"
 
 
 def test_data_ls_pending_timeout_message(monkeypatch):
