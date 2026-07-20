@@ -5,16 +5,19 @@ Fully mocked (no real cluster / kubeconfig). Two layers:
 * ``list_teams`` (SDK): aggregates namespaces carrying the ``wuji.io/team``
   label BY TEAM (ns=person, queue=team, so several people's namespaces can
   share one team) — one row per team, not per namespace. Namespaces missing
-  the label are never merged with each other. GPU quota/usage/pods are summed
-  across a team's member namespaces; each member's home-node (a per-namespace
-  Gatekeeper Assign, punchlist §8) is reported individually since a team
-  itself has no single home-node.
+  the label are never merged with each other. GPU quota is the team's Volcano
+  Queue ``deserved`` (one read per team, via ``get_queue_one`` — not summed
+  across members, since quota moved from per-namespace ResourceQuota to
+  per-team Queue); usage/pods are still summed across a team's member
+  namespaces; each member's home-node (a per-namespace Gatekeeper Assign,
+  punchlist §8) is reported individually since a team itself has no single
+  home-node.
 * ``teams`` (CLI, alias ``tm``): prints the aggregated table, an empty-state
   hint, and turns a ``WujiError`` from the SDK into a friendly non-zero exit.
 
 Mocking: monkeypatch ``sdk.load_clients`` to hand back a fake CoreV1Api exposing
-``list_namespace`` / ``list_resource_quota_for_all_namespaces``, and patch
-``sdk.usage_by_namespace`` / ``sdk.get_home_node``. Only tests/ is touched.
+``list_namespace``, and patch ``sdk.get_queue_one`` / ``sdk.usage_by_namespace``
+/ ``sdk.get_home_node``. Only tests/ is touched.
 """
 
 from types import SimpleNamespace
@@ -39,20 +42,9 @@ def _ns_item(name, team):
     return SimpleNamespace(metadata=SimpleNamespace(name=name, labels=labels))
 
 
-def _rq_item(namespace, name, gpu):
-    """A ResourceQuota list item (metadata.name/namespace + spec.hard)."""
-    hard = {} if gpu is None else {"requests.nvidia.com/gpu": gpu}
-    return SimpleNamespace(
-        metadata=SimpleNamespace(name=name, namespace=namespace),
-        spec=SimpleNamespace(hard=hard),
-    )
-
-
 class _TeamsCore:
-    def __init__(self, ns_items, *, rq_items=None, rq_exc=None, ns_exc=None):
+    def __init__(self, ns_items, *, ns_exc=None):
         self.ns_items = ns_items
-        self.rq_items = rq_items or []
-        self.rq_exc = rq_exc
         self.ns_exc = ns_exc
         self.ns_selector = "<unset>"
 
@@ -62,18 +54,18 @@ class _TeamsCore:
             raise self.ns_exc
         return SimpleNamespace(items=self.ns_items)
 
-    def list_resource_quota_for_all_namespaces(self):
-        if self.rq_exc:
-            raise self.rq_exc
-        return SimpleNamespace(items=self.rq_items)
 
-
-def _wire_teams(monkeypatch, core, *, usage=None, usage_exc=None, home_nodes=None, home_node_exc_for=None):
+def _wire_teams(monkeypatch, core, *, usage=None, usage_exc=None, home_nodes=None,
+                 home_node_exc_for=None, queues=None, queue_exc_for=None):
     """load_clients -> (core, None, None); usage_by_namespace -> usage (or raises);
     get_home_node(ns) -> home_nodes.get(ns) (or raises for namespaces named in
-    ``home_node_exc_for``, to prove a single bad member doesn't crash the call).
+    ``home_node_exc_for``, to prove a single bad member doesn't crash the call);
+    get_queue_one(team) -> {"deserved": queues[team]} for teams in ``queues``,
+    None for any other team (no such Queue), or raises for names in
+    ``queue_exc_for`` (e.g. no cluster-wide read permission).
 
-    Records the argument list_teams passes to usage_by_namespace in ``seen``.
+    Records the argument list_teams passes to usage_by_namespace, and every
+    team name list_teams passes to get_queue_one, in ``seen``.
     """
     seen = {}
     monkeypatch.setattr(sdk, "load_clients", lambda: (core, None, None))
@@ -98,6 +90,21 @@ def _wire_teams(monkeypatch, core, *, usage=None, usage_exc=None, home_nodes=Non
 
     monkeypatch.setattr(sdk, "get_home_node", fake_get_home_node)
     seen["home_node_calls"] = home_node_calls
+
+    queues = queues or {}
+    queue_exc_for = queue_exc_for or set()
+    queue_calls = []
+
+    def fake_get_queue_one(name):
+        queue_calls.append(name)
+        if name in queue_exc_for:
+            raise ApiException(status=403)
+        if name in queues:
+            return {"name": name, "deserved": queues[name]}
+        return None
+
+    monkeypatch.setattr(sdk, "get_queue_one", fake_get_queue_one)
+    seen["queue_calls"] = queue_calls
     return seen
 
 
@@ -109,7 +116,6 @@ def test_list_teams_aggregates_by_team_label(monkeypatch):
         # two namespaces sharing one team, plus a lone one on another team,
         # returned out of order to prove list_teams sorts both groups and members
         [_ns_item("bob", "redteam"), _ns_item("carol", "blueteam"), _ns_item("alice", "redteam")],
-        rq_items=[_rq_item("alice", "gpu-quota", "8"), _rq_item("bob", "gpu-quota", "4")],
     )
     seen = _wire_teams(
         monkeypatch, core,
@@ -118,6 +124,7 @@ def test_list_teams_aggregates_by_team_label(monkeypatch):
             {"namespace": "bob", "gpu": 1, "pods": 1},
             {"namespace": "carol", "gpu": 0, "pods": 0},
         ],
+        queues={"redteam": "16"},  # blueteam has no Queue -> "-"
     )
     out = sdk.list_teams()
     assert core.ns_selector == TEAM_LABEL
@@ -131,7 +138,7 @@ def test_list_teams_aggregates_by_team_label(monkeypatch):
         },
         {
             "team": "redteam", "namespaces": ["alice", "bob"],
-            "gpu_quota": "12", "gpu_used": 4, "pods": 3,
+            "gpu_quota": "16", "gpu_used": 4, "pods": 3,
             "home_nodes": {"alice": None, "bob": None},
         },
     ]
@@ -147,56 +154,51 @@ def test_list_teams_untagged_namespaces_not_merged(monkeypatch):
     assert all(r["team"] == "" for r in out)
 
 
-def test_list_teams_gpu_quota_only_from_gpu_quota_rq(monkeypatch):
-    # A differently-named RQ in the same ns must NOT be read as the gpu quota;
-    # only the one literally named "gpu-quota" counts.
-    core = _TeamsCore(
-        [_ns_item("alice", "redteam")],
-        rq_items=[
-            _rq_item("alice", "some-other-quota", "99"),
-            _rq_item("alice", "gpu-quota", "16"),
-        ],
-    )
-    _wire_teams(monkeypatch, core)
+def test_list_teams_gpu_quota_from_team_queue_deserved(monkeypatch):
+    # gpu_quota comes straight from the team's Queue.deserved (get_queue_one),
+    # not any per-member sum.
+    core = _TeamsCore([_ns_item("alice", "redteam")])
+    _wire_teams(monkeypatch, core, queues={"redteam": "16"})
     out = sdk.list_teams()
     assert out[0]["gpu_quota"] == "16"
 
 
-def test_list_teams_gpu_quota_rq_without_gpu_key_is_dash(monkeypatch):
-    # gpu-quota exists but only limits pods -> no requests.nvidia.com/gpu -> "-".
-    core = _TeamsCore(
-        [_ns_item("alice", "redteam")],
-        rq_items=[
-            SimpleNamespace(
-                metadata=SimpleNamespace(name="gpu-quota", namespace="alice"),
-                spec=SimpleNamespace(hard={"pods": "10"}),
-            )
-        ],
-    )
-    _wire_teams(monkeypatch, core)
+def test_list_teams_gpu_quota_queue_without_gpu_key_is_dash(monkeypatch):
+    # get_queue_one itself returns "-" when the Queue has no nvidia.com/gpu
+    # deserved set -> list_teams just passes that through.
+    core = _TeamsCore([_ns_item("alice", "redteam")])
+    _wire_teams(monkeypatch, core, queues={"redteam": "-"})
     assert sdk.list_teams()[0]["gpu_quota"] == "-"
 
 
-def test_list_teams_gpu_quota_partial_member_coverage_sums_known(monkeypatch):
-    # alice has a readable quota, bob's is unreadable ("-") -> team sum counts
-    # only alice's, bob doesn't zero it out or blank the whole team.
-    core = _TeamsCore(
-        [_ns_item("alice", "redteam"), _ns_item("bob", "redteam")],
-        rq_items=[_rq_item("alice", "gpu-quota", "8")],
-    )
-    _wire_teams(monkeypatch, core)
+def test_list_teams_gpu_quota_looked_up_once_per_team_not_per_member(monkeypatch):
+    # Multiple members of the same team must not each trigger their own
+    # get_queue_one call -- quota is a team-level value, one read per team.
+    core = _TeamsCore([_ns_item("alice", "redteam"), _ns_item("bob", "redteam")])
+    seen = _wire_teams(monkeypatch, core, queues={"redteam": "8"})
     out = sdk.list_teams()
     assert out[0]["gpu_quota"] == "8"
+    assert seen["queue_calls"] == ["redteam"]  # exactly one lookup
 
 
-def test_list_teams_rq_list_apiexception_all_dash(monkeypatch):
-    # Not permitted to list quotas cluster-wide -> quota column degrades to "-",
+def test_list_teams_untagged_team_never_calls_get_queue_one(monkeypatch):
+    # team == "" (untagged/single-member group) has no queue to look up at all.
+    core = _TeamsCore([_ns_item("dave", None)])
+    seen = _wire_teams(monkeypatch, core, queue_exc_for={""})
+    out = sdk.list_teams()
+    assert out[0]["gpu_quota"] == "-"
+    assert seen["queue_calls"] == []
+
+
+def test_list_teams_queue_read_failure_all_dash(monkeypatch):
+    # Not permitted to read Queues cluster-wide -> quota column degrades to "-",
     # but namespaces/usage still resolve.
-    core = _TeamsCore(
-        [_ns_item("alice", "redteam"), _ns_item("bob", "blueteam")],
-        rq_exc=ApiException(status=403),
+    core = _TeamsCore([_ns_item("alice", "redteam"), _ns_item("bob", "blueteam")])
+    _wire_teams(
+        monkeypatch, core,
+        usage=[{"namespace": "alice", "gpu": 5, "pods": 1}],
+        queue_exc_for={"redteam", "blueteam"},
     )
-    _wire_teams(monkeypatch, core, usage=[{"namespace": "alice", "gpu": 5, "pods": 1}])
     out = sdk.list_teams()
     assert [r["gpu_quota"] for r in out] == ["-", "-"]
     by_team = {r["team"]: r for r in out}
@@ -224,8 +226,8 @@ def test_list_teams_usage_absent_member_defaults_zero(monkeypatch):
 def test_list_teams_usage_exception_swallowed(monkeypatch):
     # usage is best-effort: a failing usage_by_namespace must not crash list_teams;
     # gpu_used/pods just fall back to 0.
-    core = _TeamsCore([_ns_item("alice", "redteam")], rq_items=[_rq_item("alice", "gpu-quota", "8")])
-    _wire_teams(monkeypatch, core, usage_exc=RuntimeError("boom"))
+    core = _TeamsCore([_ns_item("alice", "redteam")])
+    _wire_teams(monkeypatch, core, usage_exc=RuntimeError("boom"), queues={"redteam": "8"})
     out = sdk.list_teams()
     assert out == [
         {
@@ -274,16 +276,6 @@ def test_list_teams_list_namespace_apiexception_raises_wuji(monkeypatch):
     _wire_teams(monkeypatch, core)
     with pytest.raises(WujiError):
         sdk.list_teams()
-
-
-def test_list_teams_rq_for_other_namespace_ignored(monkeypatch):
-    # gpu-quota RQ that belongs to a DIFFERENT ns must not leak into this team.
-    core = _TeamsCore(
-        [_ns_item("alice", "redteam")],
-        rq_items=[_rq_item("carol", "gpu-quota", "32")],
-    )
-    _wire_teams(monkeypatch, core)
-    assert sdk.list_teams()[0]["gpu_quota"] == "-"
 
 
 def test_list_teams_sorted_by_team_then_by_first_member(monkeypatch):

@@ -53,6 +53,17 @@ def _guard_no_kube(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_resolve_default_queue(monkeypatch):
+    # resolve_default_queue is fail-closed now (raises without a real
+    # team-labelled namespace + matching Queue — see
+    # test_v090_sdk_quota_queue.py / test_v090_cli_quota_queue.py for that).
+    # These tests pass -t teamx, a namespace that doesn't exist for real, and
+    # don't care about queue resolution itself, so stub it rather than hit
+    # the live cluster.
+    monkeypatch.setattr(cli.sdk, "resolve_default_queue", lambda team=None: "default")
+
+
 _VALID_KUBECONFIG = {
     "apiVersion": "v1",
     "kind": "Config",

@@ -10,7 +10,7 @@
 - `schedulerName: volcano` + `queue` + gang 调度(`minAvailable = nodes`)。
 - 三个标准挂载:
   - 团队 NAS PVC `<team>-nas` → `/workspace`(读写);
-  - 共享只读数据集 PVC(默认 `shared-datasets`)→ `/datasets`(只读);
+  - 共享只读数据集 PVC(默认 `shared-nas`)→ `/datasets`(只读);
   - `dshm` = 64Gi 内存盘 → `/dev/shm`(PyTorch 多卡 / NCCL 必需)。
 - **不写 imagePullSecret**:命名空间 `default` SA 已绑 `acr-cred`。
 - 数据路径解析:`--data foo` → 容器内 `/workspace/foo`,`--shared-data bar` →
@@ -140,7 +140,8 @@ namespace > `default`。
 两者共享几乎全部参数(见下)。
 
 ```bash
-# 训练:单机 8 卡(命令放在 -- 之后;不写 --queue 默认进 default 池)
+# 训练:单机 8 卡(命令放在 -- 之后;不写 --queue 默认投你所属团队的队列——
+# namespace 要打了 wuji.io/team 标签且对应 Queue 存在,否则报错,不会静默落到 default)
 volcano train --name my-run \
   --image wuji-rl-acr-registry.cn-huhehaote.cr.aliyuncs.com/wuji-rl/<你的镜像>:<tag> \
   --gpus 8 --data mydata/ds -- python train.py --epochs 3
@@ -161,7 +162,7 @@ volcano exec mydev             # 进容器
 | `--name` | 任务名(合法 k8s 名) | 必填 |
 | `--image` `-i` | ACR 镜像完整地址 | 必填 |
 | `--team` `-t` | 团队 = namespace | 当前 context |
-| `--queue` `-q` | Volcano 队列(`default` 通用池,或 `wuji-queue-1..5` 限额队列各 8 卡) | `default` |
+| `--queue` `-q` | Volcano 队列;默认投你所属团队队列(ns 的 `wuji.io/team` 标签);没 team 或团队没建 Queue 直接报错,不回退 `default` | 团队队列 |
 | `--gpus` `-g` | 每 worker GPU 数 | train `8` / dev `1` |
 | `--nodes` | worker 数 = gang minAvailable(仅 `train`) | `1` |
 | `--cpu` `-c` / `--memory` `-m` | 每 worker CPU / 内存限额 | `16` / `64Gi` |
@@ -288,14 +289,18 @@ for r in volcano.list_images(team="wuji-rl"):
 
 # 只生成 manifest 不提交:
 from volcano import build_volcano_job
-manifest = build_volcano_job(name="x", team="wuji-rl", queue="default",
+manifest = build_volcano_job(name="x", team="wuji-rl", queue="myteam",
                              image="<镜像>", gpus=8, command="python train.py")
 ```
 
 ## 备注
 
-- 队列由管理员用 `scheduling.volcano.sh/v1beta1 Queue` 预建:`default`(通用池,不写 `--queue`
-  默认落这)+ `wuji-queue-1..5`(各限 8 卡,用 `-q wuji-queue-N` 走限额)。旧的 `shared` / `pilot`
-  已废弃删除。
+- ns=一个人,Queue=一个团队:队列由管理员用 `volcano set-queue <团队名> --deserved N --cap N
+  --reclaimable` 建(`deserved`=保底份额,`cap`=硬顶,`reclaimable`=是否允许被别的队列抢占回
+  超发的部分)。`volcano set <ns> --team <团队名>` 给人打团队标签;不写 `--queue` 时,
+  `resolve_default_queue()` 读这个标签并投到同名队列——没打标签或队列不存在直接报错,
+  绝不回退到某个万能的 `default` 队列(旧模型有过这样一个池子,任何人不管有没有 team
+  都能显式 `--queue default` 绕过团队配额,已连同 Gatekeeper 的 `queue-team-match`
+  准入规则一起收紧:非管理员现在只能提交到自己团队的队列)。
 - `volcano data ls` 在集群外无法直接读 NFS,会起一个短命 helper Pod 挂对应 PVC 跑 `ls`,取日志后删掉。
 - 没连集群 / 没 kubeconfig 时,命令给出清晰的中文报错而不是抛栈。

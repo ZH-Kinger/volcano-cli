@@ -1380,8 +1380,8 @@ def teams() -> None:
     """按团队聚合列出(带 wuji.io/team 标签的 namespace,同团队的合并一行)+
     GPU 配额与用量、以及每个成员当前的主机软亲和。
 
-    GPU配额/GPU已用/Pods 是团队下所有成员 namespace 的加总。GPU配额来自各成员
-    ns 的 ResourceQuota(读不到显示 -,需集群级读权限);GPU已用/Pods 为实时统计
+    GPU配额是团队的 Volcano Queue deserved(保底份额,见 set-queue;读不到显示 -,
+    需集群级读权限);GPU已用/Pods 是团队下所有成员 namespace 的加总实时统计
     (普通用户经 cluster-viewer 也能看)。主机软亲和是按 namespace 设的
     (`volcano set <ns> --home-node`),同团队不同成员可能绑不同机子或都没绑,
     所以逐个成员展示,不是团队级一个值。
@@ -1421,7 +1421,7 @@ def data_ls(
         False, "--shared", help="列共享只读数据集(/datasets)而非团队 NAS(/workspace)。"
     ),
     shared_dataset_pvc: str = typer.Option(
-        "shared-datasets", "--shared-pvc", help="共享数据集 PVC 名。"
+        "shared-nas", "--shared-pvc", help="共享数据集 PVC 名。"
     ),
     timeout: int = typer.Option(60, "--timeout", help="helper Pod 等待秒数。"),
 ) -> None:
